@@ -1,0 +1,1 @@
+"""Communication teaching demo package."""
