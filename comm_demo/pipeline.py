@@ -113,6 +113,7 @@ class SimulationResult:
     ber: float                           # 误比特率
     history: list[str] = field(default_factory=list)
     crc_ok: bool | None = None          # 是否使用CRC
+    gray_ok:bool | None = None          # 是否使用格雷编码
 
     @property
     def summary(self) -> str:
@@ -487,6 +488,46 @@ def bits_to_ints(bits: np.ndarray, width: int) -> np.ndarray:
     blocks = data.reshape(-1, width).astype(np.uint16, copy=False)
     return np.sum(blocks * weights, axis=1, dtype=np.uint32).astype(np.int32, copy=False)
 
+
+def binary_to_gray(values: np.ndarray | list[int]) -> np.ndarray:
+    array = np.asarray(values, dtype=np.int32)
+    if array.size == 0:
+        return np.zeros(0, dtype=np.int32)
+    gray = np.bitwise_xor(array, array >> 1)
+    return gray.astype(np.int32, copy=False)
+
+
+def gray_to_binary(values: np.ndarray | list[int]) -> np.ndarray:
+    gray = np.asarray(values, dtype=np.int32)
+    if gray.size == 0:
+        return np.zeros(0, dtype=np.int32)
+    binary = gray.copy()
+    shifted = gray.copy()
+    while True:
+        shifted = shifted >> 1
+        if not np.any(shifted):
+            break
+        binary = np.bitwise_xor(binary, shifted)
+    return binary.astype(np.int32, copy=False)
+
+def grayecode(side: int, dim_width: int, bit_groups: np.ndarray) -> np.ndarray:
+    q_bin = bits_to_ints(bit_groups[:, :dim_width].reshape(-1), dim_width)
+    i_bin = bits_to_ints(bit_groups[:, dim_width:].reshape(-1), dim_width)
+    q_gray = binary_to_gray(q_bin)
+    i_gray = binary_to_gray(i_bin)
+    indices = (q_gray * side + i_gray).astype(np.int32, copy=False)
+    return indices
+
+def graydecode(side: int, dim_width: int, detected_indices : np.ndarray) -> np.ndarray:
+    q_gray = detected_indices // side
+    i_gray = detected_indices % side
+    q_bin = gray_to_binary(q_gray)
+    i_bin = gray_to_binary(i_gray)
+    q_bits = ints_to_bits(q_bin, dim_width).reshape(-1, dim_width)
+    i_bits = ints_to_bits(i_bin, dim_width).reshape(-1, dim_width)
+    bits = np.concatenate([q_bits, i_bits], axis=1).reshape(-1).astype(np.int8, copy= False)
+    return bits
+    
 
 """
    将 PIL 图像对象打包为带尺寸头部的二进制数据流，并返回灰度像素矩阵。
@@ -919,12 +960,20 @@ def constellation(modulation: str, order: int) -> np.ndarray:
             - symbols (np.ndarray): 映射后的复数符号序列。
             - pulse (np.ndarray): 根升余弦滤波器的冲激响应系数。
 """
-def modulate(bits: np.ndarray, modulation: str, order: int, roll_off: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def modulate(
+    bits: np.ndarray, modulation: str, order: int, roll_off: float, gray_ok: bool = False
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     width = int(round(math.log2(order)))     # 计算每个符号包含几个比特
     """比特对齐"""
     if len(bits) % width:
         bits = np.r_[bits, np.zeros((-len(bits)) % width, dtype=np.uint8)]
-    indices = bits_to_ints(bits, width)  # 把比特流变成整数索引
+    # indices = bits_to_ints(bits, width)  # 把比特流变成整数索引
+    if gray_ok:
+        if modulation == "MQAM":
+            indices = grayecode(width, int(round(math.log2(width))), bits)
+        else:
+            indices = bits_to_ints(bits, width)  # 把比特流变成整数索引
+            indices = binary_to_gray(indices)
     symbols = constellation(modulation, order)[indices].astype(np.complex64)  # np.complex为复数格式
     upsampled = np.zeros(len(symbols) * SPS, dtype=np.complex64)    # 进行上采样
     upsampled[::SPS] = symbols
@@ -991,6 +1040,7 @@ def demodulate(
     modulation: str,
     order: int,
     expected_bits: int,
+    gray_ok: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     matched = np.convolve(rx_signal, pulse[::-1].conjugate(), mode="full").astype(np.complex64)
     sample_start = len(pulse) - 1
@@ -998,9 +1048,17 @@ def demodulate(
     sampled = matched[sample_points]
     equalized = (sampled / np.where(np.abs(fading) < 1e-8, 1.0 + 0j, fading)).astype(np.complex64)
     points = constellation(modulation, order)
-    indices = _detect_nearest_points(equalized, points)
-    bits = ints_to_bits(indices, int(round(math.log2(order))))[:expected_bits]
-    return matched, sampled, points[indices], bits
+    detected_indices = _detect_nearest_points(equalized, points)
+    width = int(round(math.log2(order)))
+    if gray_ok:
+        if modulation == "MQAM":
+            bits = graydecode(width, int(round(math.log2(width))), detected_indices)
+        else:
+            bits = ints_to_bits(gray_to_binary(detected_indices), width)
+    else:
+        bits = ints_to_bits(detected_indices, width)
+    bits = bits[:expected_bits]
+    return matched, sampled, points[detected_indices], bits
 
 
 def restore_output(kind: str, restored_bytes: bytes) -> tuple[str, np.ndarray | None, np.ndarray | None, int, bytes | None]:
