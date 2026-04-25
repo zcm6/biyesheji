@@ -441,15 +441,18 @@ def bits_to_bytes(bits: np.ndarray) -> bytes:
         return b""
     pad = (-len(bits)) % 8
     if pad:
-        bits = np.r_[bits, np.zeros(pad, dtype=np.uint8)]
-    return np.packbits(bits.astype(np.uint8)).tobytes()
+        bits = np.pad(bits.astype(np.uint8, copy=False), (0, pad))
+    return np.packbits(bits.astype(np.uint8, copy=False)).tobytes()
 
 
-def ints_to_bits(values: list[int], width: int) -> np.ndarray:
-    out: list[int] = []
-    for value in values:
-        out.extend([(value >> shift) & 1 for shift in range(width - 1, -1, -1)])
-    return np.array(out, dtype=np.uint8)
+def ints_to_bits(values: list[int] | np.ndarray, width: int) -> np.ndarray:
+    if width <= 0:
+        return np.zeros(0, dtype=np.uint8)
+    array = np.asarray(values, dtype=np.uint16)
+    if array.size == 0:
+        return np.zeros(0, dtype=np.uint8)
+    shifts = np.arange(width - 1, -1, -1, dtype=np.uint16)
+    return ((array[:, None] >> shifts) & 1).astype(np.uint8, copy=False).reshape(-1)
 
 
 """
@@ -471,16 +474,18 @@ def ints_to_bits(values: list[int], width: int) -> np.ndarray:
         -> 转换: 2 (二进制 10) 和 3 (二进制 11)
         -> 返回: [2, 3]
 """
-def bits_to_ints(bits: np.ndarray, width: int) -> list[int]:
-    if len(bits) % width:
-        bits = np.r_[bits, np.zeros((-len(bits)) % width, dtype=np.uint8)]
-    values = []
-    for index in range(0, len(bits), width):
-        value = 0
-        for bit in bits[index : index + width]:
-            value = (value << 1) | int(bit)
-        values.append(value)
-    return values
+def bits_to_ints(bits: np.ndarray, width: int) -> np.ndarray:
+    if width <= 0:
+        return np.zeros(0, dtype=np.int32)
+    data = np.asarray(bits, dtype=np.uint8)
+    if data.size == 0:
+        return np.zeros(0, dtype=np.int32)
+    pad = (-data.size) % width
+    if pad:
+        data = np.pad(data, (0, pad))
+    weights = (1 << np.arange(width - 1, -1, -1, dtype=np.uint16)).astype(np.uint16)
+    blocks = data.reshape(-1, width).astype(np.uint16, copy=False)
+    return np.sum(blocks * weights, axis=1, dtype=np.uint32).astype(np.int32, copy=False)
 
 
 """
@@ -919,7 +924,7 @@ def modulate(bits: np.ndarray, modulation: str, order: int, roll_off: float) -> 
     """比特对齐"""
     if len(bits) % width:
         bits = np.r_[bits, np.zeros((-len(bits)) % width, dtype=np.uint8)]
-    indices = np.array(bits_to_ints(bits, width), dtype=np.int32)  # 把比特流变成整数索引
+    indices = bits_to_ints(bits, width)  # 把比特流变成整数索引
     symbols = constellation(modulation, order)[indices].astype(np.complex64)  # np.complex为复数格式
     upsampled = np.zeros(len(symbols) * SPS, dtype=np.complex64)    # 进行上采样
     upsampled[::SPS] = symbols
@@ -954,8 +959,30 @@ def apply_channel(
     noise = rng.normal(scale=np.sqrt(noise_power / 2), size=len(rx)) + 1j * rng.normal(
         scale=np.sqrt(noise_power / 2), size=len(rx)
     )
-    return (rx + noise).astype(np.complex64), fading.astype(np.complex64)
+    return (rx + noise).astype(np.complex64, copy=False), fading.astype(np.complex64, copy=False)
 
+    """
+    判决器：在星座图中寻找与均衡信号欧几里得距离最近的星座点。
+    
+    采用分块处理机制，防止在长序列仿真时因距离矩阵过大导致内存溢出。
+    
+    Args:
+        equalized: 均衡后的复数采样点序列 
+        points: 标准星座图上的复数坐标集合
+        
+    Returns:
+        与输入序列等长的整数索引数组，代表每个采样点被判为哪个星座点
+    """
+DETECTION_CHUNK_SIZE = 8192
+def _detect_nearest_points(equalized: np.ndarray, points: np.ndarray) -> np.ndarray:
+    if len(equalized) == 0:
+        return np.zeros(0, dtype=np.int32)
+    indices = np.empty(len(equalized), dtype=np.int32)
+    for start in range(0, len(equalized), DETECTION_CHUNK_SIZE):
+        block = equalized[start : start + DETECTION_CHUNK_SIZE]
+        distances = np.abs(block[:, None] - points[None, :])
+        indices[start : start + len(block)] = np.argmin(distances, axis=1).astype(np.int32, copy=False)
+    return indices
 
 def demodulate(
     rx_signal: np.ndarray,
@@ -971,9 +998,8 @@ def demodulate(
     sampled = matched[sample_points]
     equalized = (sampled / np.where(np.abs(fading) < 1e-8, 1.0 + 0j, fading)).astype(np.complex64)
     points = constellation(modulation, order)
-    distances = np.abs(equalized[:, None] - points[None, :])
-    indices = np.argmin(distances, axis=1).astype(np.int32)
-    bits = ints_to_bits(indices.tolist(), int(round(math.log2(order))))[:expected_bits]
+    indices = _detect_nearest_points(equalized, points)
+    bits = ints_to_bits(indices, int(round(math.log2(order))))[:expected_bits]
     return matched, sampled, points[indices], bits
 
 

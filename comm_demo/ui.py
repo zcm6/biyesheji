@@ -10,7 +10,7 @@ from matplotlib import font_manager, rcParams
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PIL import Image
-from PyQt5.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal 
 from PyQt5.QtGui import QFont, QFontDatabase, QImage, QPixmap
 from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
 from PyQt5.QtWidgets import (
@@ -36,14 +36,14 @@ from PyQt5.QtWidgets import (
 
 from comm_demo.pipeline import DEFAULT_TEXT, SPS, SimulationResult, SimulationSession, create_session
 
-
+# 将NumPy数组（灰度图像数据）转换为PyQt的QPixmap，以便在图形界面显示图像
 def array_to_pixmap(array: np.ndarray) -> QPixmap:
     image = np.ascontiguousarray(array.astype(np.uint8))
     height, width = image.shape
     qimage = QImage(image.data, width, height, width, QImage.Format_Grayscale8)
     return QPixmap.fromImage(qimage.copy())
 
-
+# 将WAV格式的字节数据写入临时文件，并返回文件路径，以便QMediaPlayer播放音频
 def write_temp_wav(wav_bytes: bytes | None, prefix: str) -> str | None:
     if not wav_bytes:
         return None
@@ -53,16 +53,16 @@ def write_temp_wav(wav_bytes: bytes | None, prefix: str) -> str | None:
     handle.close()
     return handle.name
 
-
+# 定义一个名为 PlotCanvas 的类，用于在 GUI环境中嵌入 Matplotlib 绘图功能
 class PlotCanvas(FigureCanvas):
     def __init__(self):
         self.figure = Figure(figsize=(6, 4), tight_layout=True)
         super().__init__(self.figure)
 
-
+"""定义一个名为 StepWorker 的类，继承自 QObject，用于在单独的线程中执行仿真步骤，并通过信号与主线程通信"""
 class StepWorker(QObject):
-    finished = pyqtSignal(str, object)
-    failed = pyqtSignal(str)
+    finished = pyqtSignal(str, object) # 发射完成信号，包含步骤说明和结果
+    failed = pyqtSignal(str) # 发射失败信号，包含错误信息
 
     def __init__(self, session: SimulationSession):
         super().__init__()
@@ -77,7 +77,7 @@ class StepWorker(QObject):
             return
         self.finished.emit(note, result)
 
-
+# 配置matplotlib的字体设置
 def configure_plot_fonts(preferred_fonts: list[str]) -> None:
     usable: list[str] = []
     for family in preferred_fonts:
@@ -93,9 +93,9 @@ def configure_plot_fonts(preferred_fonts: list[str]) -> None:
     rcParams["font.sans-serif"] = usable + [family for family in existing if family not in usable]
     rcParams["axes.unicode_minus"] = False
 
-
+"""显示独立的眼图绘制窗口"""
 class EyeDialog(QMainWindow):
-    def __init__(self, matched_signal: np.ndarray):
+    def __init__(self, matched_signal: np.ndarray, pulse_length: int):
         super().__init__()
         self.setWindowTitle("独立眼图窗口")
         self.resize(920, 520)
@@ -104,7 +104,7 @@ class EyeDialog(QMainWindow):
         axis = canvas.figure.subplots(1, 1)
         span = 2 * SPS
         signal = np.real(matched_signal[: 400 * SPS])
-        for index in range(0, max(0, len(signal) - span), SPS):
+        for index in range(pulse_length - 1, max(0, len(signal) - span), SPS):
             axis.plot(signal[index : index + span], color="#0a6", alpha=0.15)
         axis.set_title("眼图")
         axis.grid(alpha=0.3)
@@ -115,7 +115,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("基于 Python 的通信系统仿真与教学演示系统")
-        self.resize(1560, 980)
+        self.resize(1560, 980) # 更主窗口大小
         self.session: SimulationSession | None = None
         self.result: SimulationResult | None = None
         self.eye_dialog: EyeDialog | None = None
@@ -137,12 +137,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("就绪")
 
     def _build_ui(self):
+        # 构建主界面，使用水平分割器将左侧的控制面板和右侧的可视化区分开
         wrapper = QWidget()
         self.setCentralWidget(wrapper)
         root = QHBoxLayout(wrapper)
         splitter = QSplitter(Qt.Horizontal)
         root.addWidget(splitter)
 
+        # 左侧控制面板包含信源输入、参数配置、流程控制、核心指标和阶段回溯等功能模块
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.addWidget(self._build_source_box())
@@ -160,6 +162,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(right)
         splitter.setSizes([450, 1110])
 
+    # 构建主界面左侧的”输入与预处理“参数面板
     def _build_source_box(self) -> QWidget:
         box = QGroupBox("输入与预处理")
         form = QFormLayout(box)
@@ -188,6 +191,7 @@ class MainWindow(QMainWindow):
         form.addRow("输入预览", self.input_preview)
         return box
 
+    # 构建主界面左侧的”参数配置“参数面板
     def _build_config_box(self) -> QWidget:
         box = QGroupBox("参数配置")
         form = QFormLayout(box)
@@ -197,14 +201,15 @@ class MainWindow(QMainWindow):
         self.channel_method.addItems(["CRC", "汉明码", "卷积码"])
         self.modulation = QComboBox()
         self.modulation.addItems(["MASK", "MPSK", "MQAM"])
-        self.modulation.currentTextChanged.connect(self._sync_order)
+        self.modulation.currentTextChanged.connect(self._sync_order) # 根据调制方式同步可选的调制阶数
         self.order = QComboBox()
         self.channel_name = QComboBox()
         self.channel_name.addItems(["AWGN", "瑞利衰落", "莱斯衰落"])
-        self.channel_name.currentTextChanged.connect(self._sync_channel_params)
+        self.channel_name.currentTextChanged.connect(self._sync_channel_params) # 根据信道模型同步相关参数的启用状态和提示信息
         self.snr = QLineEdit("12")
         self.kfactor = QLineEdit("3")
         self.roll_off = QLineEdit("0.35")
+        # 将上述参数配置项以标签-控件的形式添加到表单布局中，形成一个整齐的参数配置界面
         for label, widget in [
             ("信源编码", self.source_method),
             ("信道编码", self.channel_method),
@@ -218,11 +223,12 @@ class MainWindow(QMainWindow):
             form.addRow(label, widget)
         return box
 
+    # 构建主界面左侧的”流程控制“操作面板
     def _build_control_box(self) -> QWidget:
         box = QGroupBox("流程控制")
         grid = QGridLayout(box)
         self.start_button = QPushButton("开始/继续")
-        self.start_button.clicked.connect(self._start_or_resume)
+        self.start_button.clicked.connect(self._start_or_resume) 
         self.pause_button = QPushButton("暂停")
         self.pause_button.clicked.connect(self._pause)
         self.step_button = QPushButton("单步执行")
@@ -239,6 +245,7 @@ class MainWindow(QMainWindow):
             grid.addWidget(button, index // 2, index % 2)
         return box
 
+    # 构建主界面左侧的”核心指标“显示面板
     def _build_metrics_box(self) -> QWidget:
         box = QGroupBox("核心指标")
         layout = QVBoxLayout(box)
@@ -252,6 +259,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.metrics)
         return box
 
+    # 构建主界面左侧的”阶段回溯“显示面板
     def _build_history_box(self) -> QWidget:
         box = QGroupBox("阶段回溯")
         layout = QVBoxLayout(box)
@@ -260,6 +268,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.stage_history)
         return box
 
+    # 构建主界面右侧的”原始输入与恢复输出“显示面板，包括文本、图像和语音的预览，以及相关的播放按钮
     def _build_media_box(self) -> QWidget:
         box = QGroupBox("原始输入与恢复输出")
         layout = QVBoxLayout(box)
@@ -304,6 +313,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.media_wave_canvas)
         return box
 
+    # 构建主界面右侧的”可视化区“显示面板，包括比特序列、时域/频域信号、星座图和眼图等多个标签页，以及相关的选择器用于切换不同阶段的显示内容
     def _build_view_box(self) -> QWidget:
         box = QGroupBox("可视化区")
         layout = QVBoxLayout(box)
@@ -337,6 +347,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.tabs, 1)
         return box
 
+    # 根据当前选择的输入类型（文本、图像或语音）同步界面元素的状态和提示信息
     def _sync_mode(self):
         kind = self.kind.currentText()
         self.text_input.setEnabled(kind == "文本")
@@ -404,11 +415,12 @@ class MainWindow(QMainWindow):
             self.metrics.clear()
 
     def _start_or_resume(self):
+        # 如果仿真正在运行或有步骤正在执行，则不执行任何操作
         if self.timer.isActive() or self.worker_thread is not None:
             return
         if self.session is None or self.session.is_finished():
-            self._cleanup_temp_audio()
-            self._reset_runtime_views()
+            self._cleanup_temp_audio() # 清理之前的临时音频文件
+            self._reset_runtime_views() # 重置可视化区的显示状态
             try:
                 self.session = self._collect_session()
             except Exception as exc:
@@ -674,6 +686,7 @@ class MainWindow(QMainWindow):
             self.session.matched_signal,
         )
 
+    """"根据提供的比特视图、信号视图、发送符号、采样符号和匹配滤波后信号数据，更新可视化区的比特序列、时域/频域波形、星座图和眼图等显示内容"""
     def _draw_views_from_data(
         self,
         bit_views: dict[str, np.ndarray],
@@ -682,6 +695,7 @@ class MainWindow(QMainWindow):
         sampled_symbols: np.ndarray | None,
         matched_signal: np.ndarray | None,
     ):
+        # 画比特序列图
         bit_fig = self.bit_canvas.figure
         bit_fig.clear()
         ax = bit_fig.subplots(1, 1)
@@ -697,15 +711,16 @@ class MainWindow(QMainWindow):
             ax.set_axis_off()
         self.bit_canvas.draw()
 
+        # 画出信号的时域波形和频域频谱
         signal_fig = self.signal_canvas.figure
         signal_fig.clear()
         ax1, ax2 = signal_fig.subplots(2, 1)
         selected_signal = signal_views.get(self.signal_selector.currentText())
         if selected_signal is not None and len(selected_signal) > 0:
             count = min(600, len(selected_signal))
-            ax1.plot(np.real(selected_signal[:count]), label="实部")
+            ax1.plot(np.real(selected_signal[:count]), label="实部") # 画出实部波形
             if np.max(np.abs(np.imag(selected_signal[:count]))) > 1e-9:
-                ax1.plot(np.imag(selected_signal[:count]), label="虚部", alpha=0.8)
+                ax1.plot(np.imag(selected_signal[:count]), label="虚部", alpha=0.8) # 如果虚部不全为零，则画出虚部波形
             ax1.set_title(f"{self.signal_selector.currentText()}时域波形")
             ax1.grid(alpha=0.3)
             ax1.legend()
@@ -720,6 +735,7 @@ class MainWindow(QMainWindow):
             ax2.set_axis_off()
         self.signal_canvas.draw()
 
+        # 画出星座图，发送符号和接收采样分别用不同的颜色表示
         const_fig = self.const_canvas.figure
         const_fig.clear()
         ax = const_fig.subplots(1, 1)
@@ -746,7 +762,7 @@ class MainWindow(QMainWindow):
         if matched_signal is not None and len(matched_signal) > 0:
             signal = np.real(matched_signal)
             span = 2 * SPS
-            for index in range(0, max(0, len(signal) - span), SPS):
+            for index in range(len(self.session.pulse) - 1, max(0, len(signal) - span), SPS):
                 ax.plot(signal[index : index + span], color="#0a6", alpha=0.15)
             ax.set_title("眼图")
             ax.grid(alpha=0.3)
@@ -767,7 +783,7 @@ class MainWindow(QMainWindow):
         if self.result is None:
             QMessageBox.information(self, "提示", "请先运行一次完整仿真。")
             return
-        self.eye_dialog = EyeDialog(self.result.matched_signal)
+        self.eye_dialog = EyeDialog(self.result.matched_signal, len(self.result.pulse))
         self.eye_dialog.show()
 
     def _export(self):
