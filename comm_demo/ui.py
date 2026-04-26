@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QTabWidget,
     QTextEdit,
@@ -135,6 +136,7 @@ class MainWindow(QMainWindow):
         self._draw_media_waveforms()
         self._draw_idle_views()
         self._refresh_action_buttons()
+        QTimer.singleShot(0, self._init_right_splitter_sizes)
         self.statusBar().showMessage("就绪")
 
     def _build_ui(self):
@@ -156,8 +158,14 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.addWidget(self._build_media_box())
-        right_layout.addWidget(self._build_view_box(), 1)
+        self.right_splitter = QSplitter(Qt.Vertical)
+        self.right_splitter.addWidget(self._build_media_box())
+        self.right_splitter.addWidget(self._build_view_box())
+        self.right_splitter.setStretchFactor(0, 1)
+        self.right_splitter.setStretchFactor(1, 1)
+        self.right_splitter.setChildrenCollapsible(False)
+        self.right_splitter.setSizes([1, 1])  # 初始化上下区域 50% : 50%
+        right_layout.addWidget(self.right_splitter)
 
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
@@ -167,6 +175,16 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left_scroll)
         splitter.addWidget(right)
         splitter.setSizes([450, 1110])
+
+    def _init_right_splitter_sizes(self):
+        if not hasattr(self, "right_splitter"):
+            return
+        total = self.right_splitter.size().height()
+        if total <= 0:
+            self.right_splitter.setSizes([1, 1])
+            return
+        half = total // 2
+        self.right_splitter.setSizes([half, total - half])
 
     # 构建主界面左侧的”输入与预处理“参数面板
     def _build_source_box(self) -> QWidget:
@@ -283,10 +301,12 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(box)
 
         media_row = QWidget()
+        media_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         media_layout = QHBoxLayout(media_row)
         media_layout.setContentsMargins(0, 0, 0, 0)
 
         original_box = QGroupBox("原始媒体")
+        original_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         original_layout = QVBoxLayout(original_box)
         self.original_text = QTextEdit()
         self.original_text.setReadOnly(True)
@@ -301,6 +321,7 @@ class MainWindow(QMainWindow):
         original_layout.addWidget(self.play_input_audio_button)
 
         restored_box = QGroupBox("恢复媒体")
+        restored_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         restored_layout = QVBoxLayout(restored_box)
         self.restored_text = QTextEdit()
         self.restored_text.setReadOnly(True)
@@ -314,12 +335,12 @@ class MainWindow(QMainWindow):
         restored_layout.addWidget(self.restored_image)
         restored_layout.addWidget(self.play_output_audio_button)
 
-        media_layout.addWidget(original_box)
-        media_layout.addWidget(restored_box)
+        media_layout.addWidget(original_box, 1)
+        media_layout.addWidget(restored_box, 1)
 
         self.media_wave_canvas = PlotCanvas()
-        layout.addWidget(media_row)
-        layout.addWidget(self.media_wave_canvas)
+        layout.addWidget(media_row, 1)
+        layout.addWidget(self.media_wave_canvas, 1)
         return box
 
     # 构建主界面右侧的”可视化区“显示面板，包括比特序列、时域/频域信号、星座图和眼图等多个标签页，以及相关的选择器用于切换不同阶段的显示内容
