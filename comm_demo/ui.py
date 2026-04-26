@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTabWidget,
     QTextEdit,
@@ -158,7 +159,12 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self._build_media_box())
         right_layout.addWidget(self._build_view_box(), 1)
 
-        splitter.addWidget(left)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setWidget(left)
+
+        splitter.addWidget(left_scroll)
         splitter.addWidget(right)
         splitter.setSizes([450, 1110])
 
@@ -206,6 +212,8 @@ class MainWindow(QMainWindow):
         self.channel_name = QComboBox()
         self.channel_name.addItems(["AWGN", "瑞利衰落", "莱斯衰落"])
         self.channel_name.currentTextChanged.connect(self._sync_channel_params) # 根据信道模型同步相关参数的启用状态和提示信息
+        self.gray_option = QComboBox()
+        self.gray_option.addItems(["\u5426", "\u662f"])
         self.snr = QLineEdit("12")
         self.kfactor = QLineEdit("3")
         self.roll_off = QLineEdit("0.35")
@@ -216,6 +224,7 @@ class MainWindow(QMainWindow):
             ("调制方式", self.modulation),
             ("调制阶数", self.order),
             ("信道模型", self.channel_name),
+            ("\u683c\u96f7\u7801\u7f16\u7801", self.gray_option),
             ("SNR(dB)", self.snr),
             ("莱斯 K", self.kfactor),
             ("滚降系数", self.roll_off),
@@ -393,6 +402,7 @@ class MainWindow(QMainWindow):
 
     def _collect_session(self) -> SimulationSession:
         channel_name = self.channel_name.currentText()
+        gray_ok = self.gray_option.currentIndex() == 1
         return create_session(
             kind=self.kind.currentText(),
             text=self.text_input.toPlainText(),
@@ -405,6 +415,7 @@ class MainWindow(QMainWindow):
             snr_db=float(self.snr.text()),
             k_factor=float(self.kfactor.text()) if channel_name == "莱斯衰落" else 3.0,
             roll_off=float(self.roll_off.text()),
+            gray_ok=gray_ok,
         )
 
     def _ensure_session(self):

@@ -83,6 +83,7 @@ class SimulationConfig:
     snr_db: float
     k_factor: float
     roll_off: float = DEFAULT_ROLL_OFF
+    gray_ok: bool = False
 
 """
     完整仿真结果：包含链路各阶段的信号和数据
@@ -233,7 +234,7 @@ class SimulationSession:
             message = f"完成信道编码：{self.config.channel_method}，输出比特数 {len(self.channel_coded_bits)}"
         elif self.stage_index == 3:
             self.tx_signal, self.tx_symbols, self.pulse = modulate(
-                self.channel_coded_bits, self.config.modulation, self.config.order, self.config.roll_off
+                self.channel_coded_bits, self.config.modulation, self.config.order, self.config.roll_off, self.config.gray_ok
             )
             message = f"完成成型调制：{self.config.modulation}-{self.config.order}"
         elif self.stage_index == 4:
@@ -253,6 +254,7 @@ class SimulationSession:
                 self.config.modulation,
                 self.config.order,
                 len(self.channel_coded_bits),
+                self.config.gray_ok,
             )
             message = f"完成匹配滤波与判决：恢复比特数 {len(self.rx_channel_bits)}"
         elif self.stage_index == 6:
@@ -1090,9 +1092,12 @@ def create_session(
     snr_db: float,
     k_factor: float,
     roll_off: float = DEFAULT_ROLL_OFF,
+    gray_ok: bool = False,
 ) -> SimulationSession:
     return SimulationSession(
-        SimulationConfig(kind, text, path, source_method, channel_method, modulation, order, channel_name, snr_db, k_factor, roll_off)
+        SimulationConfig(
+            kind, text, path, source_method, channel_method, modulation, order, channel_name, snr_db, k_factor, roll_off, gray_ok
+        )
     )
 
 
@@ -1108,8 +1113,11 @@ def run_pipeline(
     snr_db: float,
     k_factor: float,
     roll_off: float = DEFAULT_ROLL_OFF,
+    gray_ok: bool = False,
 ) -> SimulationResult:
-    return create_session(kind, text, path, source_method, channel_method, modulation, order, channel_name, snr_db, k_factor, roll_off).run_all()
+    return create_session(
+        kind, text, path, source_method, channel_method, modulation, order, channel_name, snr_db, k_factor, roll_off, gray_ok
+    ).run_all()
 
 
 def simulate_raw_modem(
