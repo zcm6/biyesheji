@@ -1,0 +1,951 @@
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+from matplotlib import font_manager, rcParams
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from PIL import Image
+from PyQt5.QtCore import QObject, Qt, QThread, QTimer, QUrl, pyqtSignal 
+from PyQt5.QtGui import QFont, QFontDatabase, QImage, QPixmap
+from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
+from PyQt5.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFileDialog,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from comm_demo.pipeline import DEFAULT_TEXT, SPS, SimulationResult, SimulationSession, create_session
+
+# 灏哊umPy鏁扮粍锛堢伆搴﹀浘鍍忔暟鎹級杞崲涓篜yQt鐨凲Pixmap锛屼互渚垮湪鍥惧舰鐣岄潰鏄剧ず鍥惧儚
+def array_to_pixmap(array: np.ndarray) -> QPixmap:
+    image = np.ascontiguousarray(array.astype(np.uint8))
+    height, width = image.shape
+    qimage = QImage(image.data, width, height, width, QImage.Format_Grayscale8)
+    return QPixmap.fromImage(qimage.copy())
+
+# 灏哤AV鏍煎紡鐨勫瓧鑺傛暟鎹啓鍏ヤ复鏃舵枃浠讹紝骞惰繑鍥炴枃浠惰矾寰勶紝浠ヤ究QMediaPlayer鎾斁闊抽
+def write_temp_wav(wav_bytes: bytes | None, prefix: str) -> str | None:
+    if not wav_bytes:
+        return None
+    handle = tempfile.NamedTemporaryFile(prefix=prefix, suffix=".wav", delete=False)
+    handle.write(wav_bytes)
+    handle.flush()
+    handle.close()
+    return handle.name
+
+# 瀹氫箟涓€涓悕涓?PlotCanvas 鐨勭被锛岀敤浜庡湪 GUI鐜涓祵鍏?Matplotlib 缁樺浘鍔熻兘
+class PlotCanvas(FigureCanvas):
+    def __init__(self):
+        self.figure = Figure(figsize=(6, 4), tight_layout=True)
+        super().__init__(self.figure)
+
+"""瀹氫箟涓€涓悕涓?StepWorker 鐨勭被锛岀户鎵胯嚜 QObject锛岀敤浜庡湪鍗曠嫭鐨勭嚎绋嬩腑鎵ц浠跨湡姝ラ锛屽苟閫氳繃淇″彿涓庝富绾跨▼閫氫俊"""
+class StepWorker(QObject):
+    finished = pyqtSignal(str, object) # 鍙戝皠瀹屾垚淇″彿锛屽寘鍚楠よ鏄庡拰缁撴灉
+    failed = pyqtSignal(str) # 鍙戝皠澶辫触淇″彿锛屽寘鍚敊璇俊鎭?
+
+    def __init__(self, session: SimulationSession):
+        super().__init__()
+        self.session = session
+
+    def run(self):
+        try:
+            note = self.session.step()
+            result = self.session.build_result() if self.session.is_finished() else None
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.finished.emit(note, result)
+
+# 閰嶇疆matplotlib鐨勫瓧浣撹缃?
+def configure_plot_fonts(preferred_fonts: list[str]) -> None:
+    usable: list[str] = []
+    for family in preferred_fonts:
+        try:
+            font_manager.findfont(font_manager.FontProperties(family=family), fallback_to_default=False)
+        except ValueError:
+            continue
+        usable.append(family)
+    if not usable:
+        return
+    existing = list(rcParams.get("font.sans-serif", []))
+    rcParams["font.family"] = ["sans-serif"]
+    rcParams["font.sans-serif"] = usable + [family for family in existing if family not in usable]
+    rcParams["axes.unicode_minus"] = False
+
+"""鏄剧ず鐙珛鐨勭溂鍥剧粯鍒剁獥鍙?""
+class EyeDialog(QMainWindow):
+    def __init__(self, matched_signal: np.ndarray, pulse_length: int):
+        super().__init__()
+        self.setWindowTitle("鐙珛鐪煎浘绐楀彛")
+        self.resize(920, 520)
+        canvas = PlotCanvas()
+        self.setCentralWidget(canvas)
+        axis = canvas.figure.subplots(1, 1)
+        span = 2 * SPS
+        signal = np.real(matched_signal[: 400 * SPS])
+        for index in range(pulse_length - 1, max(0, len(signal) - span), SPS):
+            axis.plot(signal[index : index + span], color="#0a6", alpha=0.15)
+        axis.set_title("鐪煎浘")
+        axis.grid(alpha=0.3)
+        canvas.draw()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("鍩轰簬 Python 鐨勯€氫俊绯荤粺浠跨湡涓庢暀瀛︽紨绀虹郴缁?)
+        self.resize(1560, 980) # 鏇翠富绐楀彛澶у皬
+        self.session: SimulationSession | None = None
+        self.result: SimulationResult | None = None
+        self.eye_dialog: EyeDialog | None = None
+        self.input_audio_path: str | None = None
+        self.output_audio_path: str | None = None
+        self.worker_thread: QThread | None = None
+        self.worker: StepWorker | None = None
+        self.player = QMediaPlayer(self)
+        self.timer = QTimer(self)
+        self.view_resize_timer = QTimer(self)
+        self.view_resize_timer.setSingleShot(True)
+        self.view_resize_timer.setInterval(60)
+        self.view_resize_timer.timeout.connect(self._refresh_views_after_resize)
+        self.timer.setInterval(250)
+        self.timer.timeout.connect(self._advance_one_step)
+        self._build_ui()
+        self._sync_mode()
+        self._sync_order()
+        self._sync_channel_params()
+        self._draw_media_waveforms()
+        self._draw_idle_views()
+        self._refresh_action_buttons()
+        QTimer.singleShot(0, self._init_right_splitter_sizes)
+        self.statusBar().showMessage("灏辩华")
+
+    def _build_ui(self):
+        # 鏋勫缓涓荤晫闈紝浣跨敤姘村钩鍒嗗壊鍣ㄥ皢宸︿晶鐨勬帶鍒堕潰鏉垮拰鍙充晶鐨勫彲瑙嗗寲鍖哄垎寮€
+        wrapper = QWidget()
+        self.setCentralWidget(wrapper)
+        root = QHBoxLayout(wrapper)
+        splitter = QSplitter(Qt.Horizontal)
+        root.addWidget(splitter)
+
+        # 宸︿晶鎺у埗闈㈡澘鍖呭惈淇℃簮杈撳叆銆佸弬鏁伴厤缃€佹祦绋嬫帶鍒躲€佹牳蹇冩寚鏍囧拰闃舵鍥炴函绛夊姛鑳芥ā鍧?
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.addWidget(self._build_source_box())
+        left_layout.addWidget(self._build_config_box())
+        left_layout.addWidget(self._build_control_box())
+        left_layout.addWidget(self._build_metrics_box())
+        left_layout.addWidget(self._build_history_box())
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        self.right_splitter = QSplitter(Qt.Vertical)
+        self.right_splitter.addWidget(self._build_media_box())
+        self.right_splitter.addWidget(self._build_view_box())
+        self.right_splitter.setStretchFactor(0, 1)
+        self.right_splitter.setStretchFactor(1, 1)
+        self.right_splitter.setChildrenCollapsible(False)
+        self.right_splitter.splitterMoved.connect(self._schedule_view_refresh)
+        self.right_splitter.setSizes([1, 1])  # 鍒濆鍖栦笂涓嬪尯鍩?50% : 50%
+        right_layout.addWidget(self.right_splitter)
+
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setWidget(left)
+
+        splitter.addWidget(left_scroll)
+        splitter.addWidget(right)
+        splitter.setSizes([450, 1110])
+
+    def _init_right_splitter_sizes(self):
+        if not hasattr(self, "right_splitter"):
+            return
+        total = self.right_splitter.size().height()
+        if total <= 0:
+            self.right_splitter.setSizes([1, 1])
+            return
+        half = total // 2
+        self.right_splitter.setSizes([half, total - half])
+        self._schedule_view_refresh()
+
+    def _schedule_view_refresh(self, *_):
+        self.view_resize_timer.start()
+
+    def _refresh_views_after_resize(self):
+        if self.result is not None:
+            self._redraw_views()
+        elif self.session is not None:
+            self._redraw_partial_views()
+        else:
+            self._draw_idle_views()
+
+    # 鏋勫缓涓荤晫闈㈠乏渚х殑鈥濊緭鍏ヤ笌棰勫鐞嗏€滃弬鏁伴潰鏉?
+    def _build_source_box(self) -> QWidget:
+        box = QGroupBox("杈撳叆涓庨澶勭悊")
+        form = QFormLayout(box)
+        self.kind = QComboBox()
+        self.kind.addItems(["鏂囨湰", "鍥惧儚", "璇煶"])
+        self.kind.currentTextChanged.connect(self._sync_mode)
+        self.text_input = QPlainTextEdit(DEFAULT_TEXT)
+        self.file_path = QLineEdit()
+        self.file_path.setReadOnly(True)
+        browse = QPushButton("閫夋嫨鏂囦欢")
+        browse.clicked.connect(self._browse_file)
+        file_row = QWidget()
+        file_layout = QHBoxLayout(file_row)
+        file_layout.setContentsMargins(0, 0, 0, 0)
+        file_layout.addWidget(self.file_path)
+        file_layout.addWidget(browse)
+        self.source_hint = QLabel("璇烽€夋嫨淇℃簮绫诲瀷骞惰緭鍏ユ枃鏈垨瀵煎叆鏂囦欢銆?)
+        self.source_hint.setWordWrap(True)
+        self.input_preview = QTextEdit()
+        self.input_preview.setReadOnly(True)
+        self.input_preview.setMinimumHeight(120)
+        form.addRow("杈撳叆绫诲瀷", self.kind)
+        form.addRow("鏂囨湰杈撳叆", self.text_input)
+        form.addRow("鏂囦欢璺緞", file_row)
+        form.addRow("鎿嶄綔鎻愮ず", self.source_hint)
+        form.addRow("杈撳叆棰勮", self.input_preview)
+        return box
+
+    # 鏋勫缓涓荤晫闈㈠乏渚х殑鈥濆弬鏁伴厤缃€滃弬鏁伴潰鏉?
+    def _build_config_box(self) -> QWidget:
+        box = QGroupBox("鍙傛暟閰嶇疆")
+        form = QFormLayout(box)
+        self.source_method = QComboBox()
+        self.source_method.addItems(["鍝堝か鏇肩紪鐮?, "棣欏啘-鑼冭缂栫爜", "绠楁湳缂栫爜"])
+        self.channel_method = QComboBox()
+        self.channel_method.addItems(["CRC", "姹夋槑鐮?, "鍗风Н鐮?])
+        self.modulation = QComboBox()
+        self.modulation.addItems(["MASK", "MPSK", "MQAM"])
+        self.modulation.currentTextChanged.connect(self._sync_order) # 鏍规嵁璋冨埗鏂瑰紡鍚屾鍙€夌殑璋冨埗闃舵暟
+        self.order = QComboBox()
+        self.channel_name = QComboBox()
+        self.channel_name.addItems(["AWGN", "鐟炲埄琛拌惤", "鑾辨柉琛拌惤"])
+        self.channel_name.currentTextChanged.connect(self._sync_channel_params) # 鏍规嵁淇￠亾妯″瀷鍚屾鐩稿叧鍙傛暟鐨勫惎鐢ㄧ姸鎬佸拰鎻愮ず淇℃伅
+        self.gray_option = QComboBox()
+        self.gray_option.addItems(["\u5426", "\u662f"])
+        self.snr = QLineEdit("12")
+        self.kfactor = QLineEdit("3")
+        self.roll_off = QLineEdit("0.35")
+        # 灏嗕笂杩板弬鏁伴厤缃」浠ユ爣绛?鎺т欢鐨勫舰寮忔坊鍔犲埌琛ㄥ崟甯冨眬涓紝褰㈡垚涓€涓暣榻愮殑鍙傛暟閰嶇疆鐣岄潰
+        for label, widget in [
+            ("淇℃簮缂栫爜", self.source_method),
+            ("淇￠亾缂栫爜", self.channel_method),
+            ("璋冨埗鏂瑰紡", self.modulation),
+            ("璋冨埗闃舵暟", self.order),
+            ("淇￠亾妯″瀷", self.channel_name),
+            ("\u683c\u96f7\u7801\u7f16\u7801", self.gray_option),
+            ("SNR(dB)", self.snr),
+            ("鑾辨柉 K", self.kfactor),
+            ("婊氶檷绯绘暟", self.roll_off),
+        ]:
+            form.addRow(label, widget)
+        return box
+
+    # 鏋勫缓涓荤晫闈㈠乏渚х殑鈥濇祦绋嬫帶鍒垛€滄搷浣滈潰鏉?
+    def _build_control_box(self) -> QWidget:
+        box = QGroupBox("娴佺▼鎺у埗")
+        grid = QGridLayout(box)
+        self.start_button = QPushButton("寮€濮?缁х画")
+        self.start_button.clicked.connect(self._start_or_resume) 
+        self.pause_button = QPushButton("鏆傚仠")
+        self.pause_button.clicked.connect(self._pause)
+        self.step_button = QPushButton("鍗曟鎵ц")
+        self.step_button.clicked.connect(self._step_once)
+        self.reset_button = QPushButton("閲嶇疆")
+        self.reset_button.clicked.connect(self._reset)
+        self.eye_button = QPushButton("鏌ョ湅鐪煎浘")
+        self.eye_button.clicked.connect(self._open_eye_dialog)
+        self.export_button = QPushButton("瀵煎嚭缁撴灉")
+        self.export_button.clicked.connect(self._export)
+        for index, button in enumerate(
+            [self.start_button, self.pause_button, self.step_button, self.reset_button, self.eye_button, self.export_button]
+        ):
+            grid.addWidget(button, index // 2, index % 2)
+        return box
+
+    # 鏋勫缓涓荤晫闈㈠乏渚х殑鈥濇牳蹇冩寚鏍団€滄樉绀洪潰鏉?
+    def _build_metrics_box(self) -> QWidget:
+        box = QGroupBox("鏍稿績鎸囨爣")
+        layout = QVBoxLayout(box)
+        self.ber_label = QLabel("BER: -")
+        self.ber_label.setAlignment(Qt.AlignCenter)
+        self.ber_label.setStyleSheet("font-size:16px; padding:10px; border:1px solid #ccc;")
+        self.metrics = QTextEdit()
+        self.metrics.setReadOnly(True)
+        self.metrics.setMinimumHeight(150)
+        layout.addWidget(self.ber_label)
+        layout.addWidget(self.metrics)
+        return box
+
+    # 鏋勫缓涓荤晫闈㈠乏渚х殑鈥濋樁娈靛洖婧€滄樉绀洪潰鏉?
+    def _build_history_box(self) -> QWidget:
+        box = QGroupBox("闃舵鍥炴函")
+        layout = QVBoxLayout(box)
+        self.stage_history = QTextEdit()
+        self.stage_history.setReadOnly(True)
+        layout.addWidget(self.stage_history)
+        return box
+
+    # 鏋勫缓涓荤晫闈㈠彸渚х殑鈥濆師濮嬭緭鍏ヤ笌鎭㈠杈撳嚭鈥滄樉绀洪潰鏉匡紝鍖呮嫭鏂囨湰銆佸浘鍍忓拰璇煶鐨勯瑙堬紝浠ュ強鐩稿叧鐨勬挱鏀炬寜閽?
+    def _build_media_box(self) -> QWidget:
+        box = QGroupBox("鍘熷杈撳叆涓庢仮澶嶈緭鍑?)
+        layout = QVBoxLayout(box)
+
+        media_row = QWidget()
+        media_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        media_layout = QHBoxLayout(media_row)
+        media_layout.setContentsMargins(0, 0, 0, 0)
+
+        original_box = QGroupBox("鍘熷濯掍綋")
+        original_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        original_layout = QVBoxLayout(original_box)
+        self.original_text = QTextEdit()
+        self.original_text.setReadOnly(True)
+        self.original_image = QLabel("鍘熷鍥惧儚棰勮")
+        self.original_image.setAlignment(Qt.AlignCenter)
+        self.original_image.setMinimumHeight(160)
+        self.original_image.setStyleSheet("border:1px solid #ccc;background:#f8f8f8;")
+        self.play_input_audio_button = QPushButton("鎾斁鍘熷璇煶")
+        self.play_input_audio_button.clicked.connect(lambda: self._play_audio(self.input_audio_path))
+        original_layout.addWidget(self.original_text)
+        original_layout.addWidget(self.original_image)
+        original_layout.addWidget(self.play_input_audio_button)
+
+        restored_box = QGroupBox("鎭㈠濯掍綋")
+        restored_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        restored_layout = QVBoxLayout(restored_box)
+        self.restored_text = QTextEdit()
+        self.restored_text.setReadOnly(True)
+        self.restored_image = QLabel("鎭㈠鍥惧儚棰勮")
+        self.restored_image.setAlignment(Qt.AlignCenter)
+        self.restored_image.setMinimumHeight(160)
+        self.restored_image.setStyleSheet("border:1px solid #ccc;background:#f8f8f8;")
+        self.play_output_audio_button = QPushButton("鎾斁鎭㈠璇煶")
+        self.play_output_audio_button.clicked.connect(lambda: self._play_audio(self.output_audio_path))
+        restored_layout.addWidget(self.restored_text)
+        restored_layout.addWidget(self.restored_image)
+        restored_layout.addWidget(self.play_output_audio_button)
+
+        media_layout.addWidget(original_box, 1)
+        media_layout.addWidget(restored_box, 1)
+
+        self.media_wave_canvas = PlotCanvas()
+        layout.addWidget(media_row, 1)
+        layout.addWidget(self.media_wave_canvas, 1)
+        return box
+
+    # 鏋勫缓涓荤晫闈㈠彸渚х殑鈥濆彲瑙嗗寲鍖衡€滄樉绀洪潰鏉匡紝鍖呮嫭姣旂壒搴忓垪銆佹椂鍩?棰戝煙淇″彿銆佹槦搴у浘鍜岀溂鍥剧瓑澶氫釜鏍囩椤碉紝浠ュ強鐩稿叧鐨勯€夋嫨鍣ㄧ敤浜庡垏鎹笉鍚岄樁娈电殑鏄剧ず鍐呭
+    def _build_view_box(self) -> QWidget:
+        box = QGroupBox("鍙鍖栧尯")
+        layout = QVBoxLayout(box)
+        selectors = QWidget()
+        selectors_layout = QHBoxLayout(selectors)
+        selectors_layout.setContentsMargins(0, 0, 0, 0)
+        self.bit_selector = QComboBox()
+        self.bit_selector.addItems(["鍘熷姣旂壒娴?, "淇℃簮缂栫爜鍚?, "淇￠亾缂栫爜鍚?, "鍒ゅ喅鍚庢瘮鐗规祦", "淇￠亾瑙ｇ爜鍚?])
+        self.bit_selector.currentTextChanged.connect(self._redraw_views)
+        self.signal_selector = QComboBox()
+        self.signal_selector.addItems(["璋冨埗鍚庝俊鍙?, "淇￠亾鍚庝俊鍙?, "鍖归厤婊ゆ尝鍚庝俊鍙?])
+        self.signal_selector.currentTextChanged.connect(self._redraw_views)
+        selectors_layout.addWidget(QLabel("姣旂壒闃舵"))
+        selectors_layout.addWidget(self.bit_selector)
+        selectors_layout.addWidget(QLabel("淇″彿闃舵"))
+        selectors_layout.addWidget(self.signal_selector)
+
+        self.tabs = QTabWidget()
+        self.bit_canvas = PlotCanvas()
+        self.signal_canvas = PlotCanvas()
+        self.const_canvas = PlotCanvas()
+        self.eye_canvas = PlotCanvas()
+        self.tabs.currentChanged.connect(self._schedule_view_refresh)
+        for title, canvas in [
+            ("姣旂壒搴忓垪", self.bit_canvas),
+            ("鏃跺煙/棰戝煙", self.signal_canvas),
+            ("鏄熷骇鍥?, self.const_canvas),
+            ("鐪煎浘", self.eye_canvas),
+        ]:
+            self.tabs.addTab(canvas, title)
+        layout.addWidget(selectors)
+        layout.addWidget(self.tabs, 1)
+        return box
+
+    # 鏍规嵁褰撳墠閫夋嫨鐨勮緭鍏ョ被鍨嬶紙鏂囨湰銆佸浘鍍忔垨璇煶锛夊悓姝ョ晫闈㈠厓绱犵殑鐘舵€佸拰鎻愮ず淇℃伅
+    def _sync_mode(self):
+        kind = self.kind.currentText()
+        self.text_input.setEnabled(kind == "鏂囨湰")
+        self.file_path.setEnabled(kind != "鏂囨湰")
+        if kind == "鏂囨湰":
+            self.source_hint.setText("璇疯緭鍏ヤ腑鑻辨枃鏂囨湰锛岀郴缁熶細灏嗗叾杞崲涓烘瘮鐗规祦銆?)
+            self.input_preview.setPlainText(self.text_input.toPlainText().strip() or DEFAULT_TEXT)
+        elif kind == "鍥惧儚":
+            self.source_hint.setText("璇烽€夋嫨鍥惧儚鏂囦欢锛岀郴缁熶細鍏堢伆搴﹀寲鍐嶈浆鎹负姣旂壒娴併€?)
+            self.input_preview.setPlainText(self.file_path.text() or "璇烽€夋嫨鍥惧儚鏂囦欢銆?)
+        else:
+            self.source_hint.setText("璇烽€夋嫨 16-bit PCM WAV 闊抽鏂囦欢锛岀郴缁熶細璇诲彇閲囨牱骞堕噺鍖栥€?)
+            self.input_preview.setPlainText(self.file_path.text() or "璇烽€夋嫨璇煶鏂囦欢銆?)
+
+    def _sync_order(self):
+        self.order.clear()
+        if self.modulation.currentText() == "MQAM":
+            self.order.addItems(["16"])
+        else:
+            self.order.addItems(["2", "4", "8", "16"])
+
+    def _sync_channel_params(self):
+        is_rician = self.channel_name.currentText() == "鑾辨柉琛拌惤"
+        self.kfactor.setEnabled(is_rician)
+        self.kfactor.setPlaceholderText("" if is_rician else "浠呰幈鏂“钀芥湁鏁?)
+        self.kfactor.setToolTip("K 鍊间粎鍦ㄨ幈鏂“钀戒俊閬撲笅鐢熸晥銆?)
+
+    def _browse_file(self):
+        kind = self.kind.currentText()
+        file_filter = "Images (*.png *.jpg *.jpeg *.bmp)" if kind == "鍥惧儚" else "Wave (*.wav)"
+        path, _ = QFileDialog.getOpenFileName(self, "閫夋嫨鏂囦欢", "", file_filter)
+        if not path:
+            return
+        self.file_path.setText(path)
+        self.input_preview.setPlainText(path)
+        if kind == "鍥惧儚":
+            image = Image.open(path).convert("L")
+            pixmap = array_to_pixmap(np.array(image, dtype=np.uint8))
+            self.original_image.setPixmap(
+                pixmap.scaled(self.original_image.width(), self.original_image.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        self.statusBar().showMessage(f"宸查€夋嫨鏂囦欢: {Path(path).name}")
+
+    def _collect_session(self) -> SimulationSession:
+        channel_name = self.channel_name.currentText()
+        gray_ok = self.gray_option.currentIndex() == 1
+        return create_session(
+            kind=self.kind.currentText(),
+            text=self.text_input.toPlainText(),
+            path=self.file_path.text(),
+            source_method=self.source_method.currentText(),
+            channel_method=self.channel_method.currentText(),
+            modulation=self.modulation.currentText(),
+            order=int(self.order.currentText()),
+            channel_name=channel_name,
+            snr_db=float(self.snr.text()),
+            k_factor=float(self.kfactor.text()) if channel_name == "鑾辨柉琛拌惤" else 3.0,
+            roll_off=float(self.roll_off.text()),
+            gray_ok=gray_ok,
+        )
+
+    def _ensure_session(self):
+        if self.session is None or self.session.is_finished():
+            self.session = self._collect_session()
+            self.result = None
+            self.stage_history.clear()
+            self.metrics.clear()
+
+    def _start_or_resume(self):
+        # 濡傛灉浠跨湡姝ｅ湪杩愯鎴栨湁姝ラ姝ｅ湪鎵ц锛屽垯涓嶆墽琛屼换浣曟搷浣?
+        if self.timer.isActive() or self.worker_thread is not None:
+            return
+        if self.session is None or self.session.is_finished():
+            self._cleanup_temp_audio() # 娓呯悊涔嬪墠鐨勪复鏃堕煶棰戞枃浠?
+            self._reset_runtime_views() # 閲嶇疆鍙鍖栧尯鐨勬樉绀虹姸鎬?
+            try:
+                self.session = self._collect_session()
+            except Exception as exc:
+                QMessageBox.critical(self, "鍙傛暟閿欒", str(exc))
+                return
+        self.timer.start()
+        self._refresh_action_buttons()
+        self.statusBar().showMessage("浠跨湡杩愯涓?)
+
+    def _pause(self):
+        self.timer.stop()
+        self._refresh_action_buttons()
+        if self.worker_thread is not None:
+            self.statusBar().showMessage("褰撳墠姝ラ鎵ц涓紝鏈瀹屾垚鍚庢殏鍋?)
+        else:
+            self.statusBar().showMessage("宸叉殏鍋?)
+
+    def _step_once(self):
+        if self.timer.isActive():
+            self.timer.stop()
+        if self.worker_thread is not None:
+            return
+        self._ensure_session()
+        self._advance_one_step()
+
+    def _advance_one_step(self):
+        if self.session is None or self.worker_thread is not None:
+            return
+        self.statusBar().showMessage(f"鎵ц涓? {self.session.next_stage()}")
+        self._run_step_async()
+
+    def _run_step_async(self):
+        if self.session is None or self.worker_thread is not None:
+            return
+        self.worker_thread = QThread(self)
+        self.worker = StepWorker(self.session)
+        self.worker.moveToThread(self.worker_thread)
+        self.worker_thread.started.connect(self.worker.run)
+        self.worker.finished.connect(self._handle_step_finished)
+        self.worker.failed.connect(self._handle_step_failed)
+        self.worker.finished.connect(self.worker_thread.quit)
+        self.worker.failed.connect(self.worker_thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.failed.connect(self.worker.deleteLater)
+        self.worker_thread.finished.connect(self.worker_thread.deleteLater)
+        self.worker_thread.finished.connect(self._on_worker_thread_finished)
+        self.worker_thread.start()
+        self._refresh_action_buttons()
+
+    def _handle_step_finished(self, note: str, result: SimulationResult | None):
+        self.stage_history.setPlainText("\n".join(self.session.history))
+        self.statusBar().showMessage(note)
+        self._render_source_preview()
+        self._redraw_partial_views()
+        if result is not None:
+            self.timer.stop()
+            self.result = result
+            self._render_result()
+        else:
+            self._render_partial_metrics()
+
+    def _handle_step_failed(self, error: str):
+        self.timer.stop()
+        self._refresh_action_buttons()
+        QMessageBox.critical(self, "鎵ц澶辫触", error)
+
+    def _on_worker_thread_finished(self):
+        self.worker_thread = None
+        self.worker = None
+        self._refresh_action_buttons()
+
+    def _refresh_action_buttons(self):
+        busy = self.worker_thread is not None
+        self.start_button.setEnabled(not busy and not self.timer.isActive())
+        self.step_button.setEnabled(not busy)
+        self.reset_button.setEnabled(not busy)
+        self.pause_button.setEnabled(self.timer.isActive() or busy)
+        self.export_button.setEnabled(self.result is not None and not busy)
+        self.eye_button.setEnabled(self.result is not None and not busy)
+
+    def _render_partial_metrics(self):
+        if self.session is None:
+            return
+        lines = [
+            f"褰撳墠闃舵: {self.session.next_stage()}",
+            f"宸插畬鎴愰樁娈垫暟: {self.session.stage_index}/8",
+        ]
+        if self.session.source_bits is not None:
+            lines.append(f"鍘熷姣旂壒鏁? {len(self.session.source_bits)}")
+        if self.session.source_coded_bits is not None:
+            lines.append(f"淇℃簮缂栫爜鍚庢瘮鐗规暟: {len(self.session.source_coded_bits)}")
+        if self.session.channel_coded_bits is not None:
+            lines.append(f"淇￠亾缂栫爜鍚庢瘮鐗规暟: {len(self.session.channel_coded_bits)}")
+        self.metrics.setPlainText("\n".join(lines))
+
+    def _render_source_preview(self):
+        if self.session is None or self.session.source is None:
+            return
+        source = self.session.source
+        self.original_text.setPlainText(source.preview_text)
+        if source.kind == "鏂囨湰":
+            self.original_image.setPixmap(QPixmap())
+            self.original_image.setText("鏂囨湰妯″紡涓嬫棤鍥惧儚棰勮")
+            self.play_input_audio_button.setEnabled(False)
+            self.input_audio_path = None
+        elif source.kind == "鍥惧儚":
+            self.original_image.setText("")
+            self.original_image.setPixmap(
+                array_to_pixmap(source.image_array).scaled(
+                    self.original_image.width(),
+                    self.original_image.height(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
+            self.play_input_audio_button.setEnabled(False)
+            self.input_audio_path = None
+        else:
+            self.original_image.setPixmap(QPixmap())
+            self.original_image.setText("璇煶妯″紡涓嬭鏌ョ湅涓嬫柟娉㈠舰骞剁偣鍑绘挱鏀?)
+            if self.input_audio_path and Path(self.input_audio_path).exists():
+                try:
+                    os.remove(self.input_audio_path)
+                except OSError:
+                    pass
+            self.input_audio_path = write_temp_wav(source.audio_wav_bytes, "comm_demo_input_")
+            self.play_input_audio_button.setEnabled(self.input_audio_path is not None)
+        self._draw_media_waveforms()
+
+    def _render_result(self):
+        if self.result is None:
+            return
+        summary = self.result.summary_text()
+        self.metrics.setPlainText(summary)
+        self.stage_history.setPlainText("\n".join(self.result.history))
+        self.restored_text.setPlainText(self.result.restored_text)
+        ber_color = "#1f8b4c" if self.result.ber < 0.05 else "#b94a48"
+        self.ber_label.setText(f"BER: {self.result.ber:.6f}")
+        self.ber_label.setStyleSheet(f"font-size:16px; padding:10px; border:1px solid #ccc; color:{ber_color};")
+        if self.result.restored_image is not None:
+            self.restored_image.setText("")
+            self.restored_image.setPixmap(
+                array_to_pixmap(self.result.restored_image).scaled(
+                    self.restored_image.width(),
+                    self.restored_image.height(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
+        else:
+            self.restored_image.setPixmap(QPixmap())
+            self.restored_image.setText("褰撳墠缁撴灉鏃犳仮澶嶅浘鍍?)
+        if self.output_audio_path and Path(self.output_audio_path).exists():
+            try:
+                os.remove(self.output_audio_path)
+            except OSError:
+                pass
+        self.output_audio_path = write_temp_wav(self.result.restored_audio_wav_bytes, "comm_demo_output_")
+        self.play_output_audio_button.setEnabled(self.output_audio_path is not None)
+        self._draw_media_waveforms()
+        self._redraw_views()
+        self.statusBar().showMessage("浠跨湡瀹屾垚")
+
+    def _draw_media_waveforms(self):
+        fig = self.media_wave_canvas.figure
+        fig.clear()
+        ax1, ax2 = fig.subplots(2, 1)
+        if self.session and self.session.source and self.session.source.audio_samples is not None:
+            samples = self.session.source.audio_samples
+            rate = self.session.source.sample_rate
+            x = np.arange(len(samples)) / max(rate, 1)
+            ax1.plot(x[: min(len(x), 4000)], samples[: min(len(samples), 4000)], color="#1f77b4")
+            ax1.set_title("鍘熷璇煶娉㈠舰")
+            ax1.set_xlabel("鏃堕棿(s)")
+            ax1.grid(alpha=0.3)
+        else:
+            ax1.text(0.5, 0.5, "褰撳墠杈撳叆涓嶆槸璇煶", ha="center", va="center", transform=ax1.transAxes)
+            ax1.set_axis_off()
+        if self.result and self.result.restored_audio_samples is not None:
+            samples = self.result.restored_audio_samples
+            rate = self.result.restored_audio_rate
+            x = np.arange(len(samples)) / max(rate, 1)
+            ax2.plot(x[: min(len(x), 4000)], samples[: min(len(samples), 4000)], color="#d62728")
+            ax2.set_title("鎭㈠璇煶娉㈠舰")
+            ax2.set_xlabel("鏃堕棿(s)")
+            ax2.grid(alpha=0.3)
+        else:
+            ax2.text(0.5, 0.5, "褰撳墠缁撴灉娌℃湁鎭㈠璇煶", ha="center", va="center", transform=ax2.transAxes)
+            ax2.set_axis_off()
+        self.media_wave_canvas.draw()
+
+    def _draw_idle_views(self):
+        bit_fig = self.bit_canvas.figure
+        bit_fig.clear()
+        ax = bit_fig.subplots(1, 1)
+        ax.text(0.5, 0.5, "杩愯浠跨湡鍚庢樉绀烘瘮鐗瑰簭鍒?, ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("姣旂壒搴忓垪")
+        ax.set_axis_off()
+        bit_fig.tight_layout()
+        self.bit_canvas.draw_idle()
+
+        signal_fig = self.signal_canvas.figure
+        signal_fig.clear()
+        ax1, ax2 = signal_fig.subplots(2, 1)
+        ax1.text(0.5, 0.5, "杩愯鍒版垚鍨嬭皟鍒跺悗鏄剧ず鏃跺煙娉㈠舰", ha="center", va="center", transform=ax1.transAxes)
+        ax2.text(0.5, 0.5, "杩愯鍒版垚鍨嬭皟鍒跺悗鏄剧ず棰戝煙棰戣氨", ha="center", va="center", transform=ax2.transAxes)
+        ax1.set_axis_off()
+        ax2.set_axis_off()
+        self.signal_canvas.draw()
+
+        const_fig = self.const_canvas.figure
+        const_fig.clear()
+        ax = const_fig.subplots(1, 1)
+        ax.text(0.5, 0.5, "杩愯鍒版垚鍨嬭皟鍒跺悗鏄剧ず鏄熷骇鍥?, ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("鏄熷骇鍥?)
+        ax.set_axis_off()
+        self.const_canvas.draw()
+
+        eye_fig = self.eye_canvas.figure
+        eye_fig.clear()
+        ax = eye_fig.subplots(1, 1)
+        ax.text(0.5, 0.5, "杩愯鍒板尮閰嶆护娉笌鍒ゅ喅鍚庢樉绀虹溂鍥?, ha="center", va="center", transform=ax.transAxes)
+        ax.set_title("鐪煎浘")
+        ax.set_axis_off()
+        self.eye_canvas.draw()
+
+    def _redraw_views(self):
+        if self.result is None:
+            return
+        self._draw_views_from_data(
+            self.result.bit_views(),
+            self.result.signal_views(),
+            self.result.tx_symbols,
+            self.result.sampled_symbols,
+            self.result.matched_signal,
+        )
+
+    def _redraw_partial_views(self):
+        if self.session is None:
+            return
+        bit_views = {}
+        signal_views = {}
+        if self.session.source_bits is not None:
+            bit_views["鍘熷姣旂壒娴?] = self.session.source_bits
+        if self.session.source_coded_bits is not None:
+            bit_views["淇℃簮缂栫爜鍚?] = self.session.source_coded_bits
+        if self.session.channel_coded_bits is not None:
+            bit_views["淇￠亾缂栫爜鍚?] = self.session.channel_coded_bits
+        if self.session.rx_channel_bits is not None:
+            bit_views["鍒ゅ喅鍚庢瘮鐗规祦"] = self.session.rx_channel_bits
+        if self.session.decoded_source_bits is not None:
+            bit_views["淇￠亾瑙ｇ爜鍚?] = self.session.decoded_source_bits
+        if self.session.tx_signal is not None:
+            signal_views["璋冨埗鍚庝俊鍙?] = self.session.tx_signal
+        if self.session.rx_signal is not None:
+            signal_views["淇￠亾鍚庝俊鍙?] = self.session.rx_signal
+        if self.session.matched_signal is not None:
+            signal_views["鍖归厤婊ゆ尝鍚庝俊鍙?] = self.session.matched_signal
+        self._draw_views_from_data(
+            bit_views,
+            signal_views,
+            self.session.tx_symbols,
+            self.session.sampled_symbols,
+            self.session.matched_signal,
+        )
+
+    """"鏍规嵁鎻愪緵鐨勬瘮鐗硅鍥俱€佷俊鍙疯鍥俱€佸彂閫佺鍙枫€侀噰鏍风鍙峰拰鍖归厤婊ゆ尝鍚庝俊鍙锋暟鎹紝鏇存柊鍙鍖栧尯鐨勬瘮鐗瑰簭鍒椼€佹椂鍩?棰戝煙娉㈠舰銆佹槦搴у浘鍜岀溂鍥剧瓑鏄剧ず鍐呭"""
+    def _draw_views_from_data(
+        self,
+        bit_views: dict[str, np.ndarray],
+        signal_views: dict[str, np.ndarray],
+        tx_symbols: np.ndarray | None,
+        sampled_symbols: np.ndarray | None,
+        matched_signal: np.ndarray | None,
+    ):
+        # 鐢绘瘮鐗瑰簭鍒楀浘
+        bit_fig = self.bit_canvas.figure
+        bit_fig.clear()
+        ax = bit_fig.subplots(1, 1)
+        selected_bits = bit_views.get(self.bit_selector.currentText())
+        if selected_bits is not None:
+            pixel_budget = (max(self.bit_canvas.width(), 1) * max(self.bit_canvas.height(), 1)) // 900
+            limit = min(max(128, min(4096, pixel_budget)), len(selected_bits))
+            ax.step(np.arange(limit), selected_bits[:limit], where="post")
+            ax.set_ylim(-0.2, 1.2)
+            ax.set_xlim(0, max(limit - 1, 1))
+            ax.set_title(self.bit_selector.currentText())
+            ax.set_xlabel("sample")
+            ax.set_ylabel("bit")
+            ax.grid(alpha=0.3)
+        else:
+            ax.text(0.5, 0.5, "褰撳墠闃舵鏆傛棤璇ユ瘮鐗规暟鎹?, ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+        bit_fig.tight_layout()
+        self.bit_canvas.draw_idle()
+
+        # 鐢诲嚭淇″彿鐨勬椂鍩熸尝褰㈠拰棰戝煙棰戣氨
+        signal_fig = self.signal_canvas.figure
+        signal_fig.clear()
+        ax1, ax2 = signal_fig.subplots(2, 1)
+        selected_signal = signal_views.get(self.signal_selector.currentText())
+        if selected_signal is not None and len(selected_signal) > 0:
+            pixel_budget = (max(self.signal_canvas.width(), 1) * max(self.signal_canvas.height(), 1)) // 480
+            count = min(max(256, min(4096, pixel_budget)), len(selected_signal))
+            ax1.plot(np.real(selected_signal[:count]), label="瀹為儴") # 鐢诲嚭瀹為儴娉㈠舰
+            if np.max(np.abs(np.imag(selected_signal[:count]))) > 1e-9:
+                ax1.plot(np.imag(selected_signal[:count]), label="铏氶儴", alpha=0.8) # 濡傛灉铏氶儴涓嶅叏涓洪浂锛屽垯鐢诲嚭铏氶儴娉㈠舰
+            ax1.set_title(f"{self.signal_selector.currentText()}鏃跺煙娉㈠舰")
+            ax1.set_xlabel("sample")
+            ax1.grid(alpha=0.3)
+            ax1.legend()
+            spectrum = np.fft.fftshift(np.fft.fft(selected_signal[: min(len(selected_signal), 4096)], n=2048))
+            freq = np.linspace(-0.5, 0.5, len(spectrum))
+            ax2.plot(freq, 20 * np.log10(np.abs(spectrum) + 1e-9))
+            ax2.set_title(f"{self.signal_selector.currentText()}棰戣氨")
+            ax2.set_xlabel("normalized frequency")
+            ax2.set_ylabel("dB")
+            ax2.grid(alpha=0.3)
+        else:
+            ax1.text(0.5, 0.5, "褰撳墠闃舵鏆傛棤璇ヤ俊鍙锋暟鎹?, ha="center", va="center", transform=ax1.transAxes)
+            ax1.set_axis_off()
+            ax2.set_axis_off()
+        signal_fig.tight_layout()
+        self.signal_canvas.draw_idle()
+
+        # 鐢诲嚭鏄熷骇鍥撅紝鍙戦€佺鍙峰拰鎺ユ敹閲囨牱鍒嗗埆鐢ㄤ笉鍚岀殑棰滆壊琛ㄧず
+        const_fig = self.const_canvas.figure
+        const_fig.clear()
+        ax = const_fig.subplots(1, 1)
+        if tx_symbols is not None and len(tx_symbols) > 0:
+            tx = tx_symbols[:500]
+            ax.scatter(np.real(tx), np.imag(tx), s=12, alpha=0.6, label="鍙戦€佺鍙?)
+            if sampled_symbols is not None and len(sampled_symbols) > 0:
+                rx = sampled_symbols[:500]
+                ax.scatter(np.real(rx), np.imag(rx), s=12, alpha=0.6, label="鎺ユ敹閲囨牱")
+            ax.set_title("鏄熷骇鍥?)
+            ax.set_xlabel("I")
+            ax.set_ylabel("Q")
+            ax.axis("equal")
+            ax.grid(alpha=0.3)
+            ax.legend()
+        else:
+            ax.text(0.5, 0.5, "褰撳墠闃舵鏆傛棤鏄熷骇鏁版嵁", ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+        self.const_canvas.draw()
+
+        eye_fig = self.eye_canvas.figure
+        eye_fig.clear()
+        ax = eye_fig.subplots(1, 1)
+        if matched_signal is not None and len(matched_signal) > 0:
+            signal = np.real(matched_signal)
+            span = 2 * SPS
+            max_traces = max(32, min(520, max(self.eye_canvas.height(), 1) // 2))
+            trace_count = 0
+            for index in range(len(self.session.pulse) - 1, max(0, len(signal) - span), SPS):
+                ax.plot(signal[index : index + span], color="#0a6", alpha=0.15)
+                trace_count += 1
+                if trace_count >= max_traces:
+                    break
+            ax.set_title("鐪煎浘")
+            ax.grid(alpha=0.3)
+        else:
+            ax.text(0.5, 0.5, "褰撳墠闃舵鏆傛棤鐪煎浘鏁版嵁", ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+        eye_fig.tight_layout()
+        self.eye_canvas.draw_idle()
+
+    def _play_audio(self, path: str | None):
+        if not path or not Path(path).exists():
+            QMessageBox.information(self, "鎻愮ず", "褰撳墠娌℃湁鍙挱鏀剧殑璇煶鏂囦欢銆?)
+            return
+        self.player.setMedia(QMediaContent(QUrl.fromLocalFile(str(Path(path).resolve()))))
+        self.player.play()
+        self.statusBar().showMessage(f"姝ｅ湪鎾斁: {Path(path).name}")
+
+    def _open_eye_dialog(self):
+        if self.result is None:
+            QMessageBox.information(self, "鎻愮ず", "璇峰厛杩愯涓€娆″畬鏁翠豢鐪熴€?)
+            return
+        self.eye_dialog = EyeDialog(self.result.matched_signal, len(self.result.pulse))
+        self.eye_dialog.show()
+
+    def _export(self):
+        if self.result is None:
+            QMessageBox.information(self, "鎻愮ず", "璇峰厛杩愯涓€娆″畬鏁翠豢鐪熴€?)
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "瀵煎嚭缁撴灉", "simulation_report.txt", "Text (*.txt)")
+        if not path:
+            return
+        content = (
+            self.result.summary_text()
+            + "\n\n闃舵鍘嗗彶:\n"
+            + "\n".join(self.result.history)
+            + "\n\n鍘熷棰勮:\n"
+            + self.original_text.toPlainText()
+            + "\n\n鎭㈠棰勮:\n"
+            + self.restored_text.toPlainText()
+        )
+        Path(path).write_text(content, encoding="utf-8")
+        self.statusBar().showMessage(f"宸插鍑哄埌: {Path(path).name}")
+
+    def _reset_runtime_views(self):
+        self.stage_history.clear()
+        self.metrics.clear()
+        self.original_text.clear()
+        self.restored_text.clear()
+        self.original_image.setPixmap(QPixmap())
+        self.original_image.setText("鍘熷鍥惧儚棰勮")
+        self.restored_image.setPixmap(QPixmap())
+        self.restored_image.setText("鎭㈠鍥惧儚棰勮")
+        self.ber_label.setText("BER: -")
+        self.ber_label.setStyleSheet("font-size:16px; padding:10px; border:1px solid #ccc;")
+        self._draw_media_waveforms()
+        self._draw_idle_views()
+
+    def _cleanup_temp_audio(self):
+        for attr in ["input_audio_path", "output_audio_path"]:
+            path = getattr(self, attr)
+            if path and Path(path).exists():
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            setattr(self, attr, None)
+
+    def _reset(self):
+        if self.worker_thread is not None:
+            QMessageBox.information(self, "鎻愮ず", "褰撳墠姝ラ浠嶅湪鎵ц锛岃绛夊緟瀹屾垚鍚庡啀閲嶇疆銆?)
+            return
+        self.timer.stop()
+        self.player.stop()
+        self.session = None
+        self.result = None
+        self._cleanup_temp_audio()
+        self.file_path.clear()
+        self.input_preview.clear()
+        self._reset_runtime_views()
+        self.play_input_audio_button.setEnabled(False)
+        self.play_output_audio_button.setEnabled(False)
+        self._refresh_action_buttons()
+        self.statusBar().showMessage("宸查噸缃?)
+        self._sync_mode()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_view_refresh()
+
+    def closeEvent(self, event):
+        self.timer.stop()
+        self.player.stop()
+        if self.worker_thread is not None:
+            self.worker_thread.quit()
+            self.worker_thread.wait()
+        self._cleanup_temp_audio()
+        super().closeEvent(event)
+
+
+def run_app():
+    app = QApplication(sys.argv)
+    preferred_fonts = [
+        "Microsoft YaHei UI",
+        "Microsoft YaHei",
+        "PingFang SC",
+        "Hiragino Sans GB",
+        "Noto Sans CJK SC",
+        "WenQuanYi Micro Hei",
+        "SimHei",
+        "SimSun",
+    ]
+    configure_plot_fonts(preferred_fonts)
+    available = set(QFontDatabase().families())
+    for family in preferred_fonts:
+        if family in available:
+            app.setFont(QFont(family, 10))
+            break
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
