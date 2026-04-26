@@ -969,12 +969,14 @@ def modulate(
     """比特对齐"""
     if len(bits) % width:
         bits = np.r_[bits, np.zeros((-len(bits)) % width, dtype=np.uint8)]
-    # indices = bits_to_ints(bits, width)  # 把比特流变成整数索引
+    indices = bits_to_ints(bits, width)  # 把比特流变成整数索引
     if gray_ok:
         if modulation == "MQAM":
-            indices = grayecode(width, int(round(math.log2(width))), bits)
+            side = int(round(math.sqrt(order)))
+            dim_width = int(round(math.log2(side)))
+            bit_groups = bits.reshape(-1, width)
+            indices = grayecode(side, dim_width, bit_groups)
         else:
-            indices = bits_to_ints(bits, width)  # 把比特流变成整数索引
             indices = binary_to_gray(indices)
     symbols = constellation(modulation, order)[indices].astype(np.complex64)  # np.complex为复数格式
     upsampled = np.zeros(len(symbols) * SPS, dtype=np.complex64)    # 进行上采样
@@ -1054,7 +1056,9 @@ def demodulate(
     width = int(round(math.log2(order)))
     if gray_ok:
         if modulation == "MQAM":
-            bits = graydecode(width, int(round(math.log2(width))), detected_indices)
+            side = int(round(math.sqrt(order)))
+            dim_width = int(round(math.log2(side)))
+            bits = graydecode(side, dim_width, detected_indices)
         else:
             bits = ints_to_bits(gray_to_binary(detected_indices), width)
     else:
