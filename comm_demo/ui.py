@@ -737,7 +737,7 @@ class MainWindow(QMainWindow):
             ax.step(np.arange(limit), selected_bits[:limit], where="post")
             ax.set_ylim(-0.2, 1.2)
             ax.set_title(self.bit_selector.currentText())
-            ax.axis("equal")
+            # ax.axis("equal")
             ax.grid(alpha=0.3)
         else:
             ax.text(0.5, 0.5, "当前阶段暂无该比特数据", ha="center", va="center", transform=ax.transAxes)
@@ -761,7 +761,7 @@ class MainWindow(QMainWindow):
             freq = np.linspace(-0.5, 0.5, len(spectrum))
             ax2.plot(freq, 20 * np.log10(np.abs(spectrum) + 1e-9))
             ax2.set_title(f"{self.signal_selector.currentText()}频谱")
-            ax.axis("equal")
+            # ax.axis("equal")
             ax2.grid(alpha=0.3)
         else:
             ax1.text(0.5, 0.5, "当前阶段暂无该信号数据", ha="center", va="center", transform=ax1.transAxes)
@@ -799,7 +799,7 @@ class MainWindow(QMainWindow):
             for index in range(len(self.session.pulse) - 1, max(0, len(signal) - span), SPS):
                 ax.plot(signal[index : index + span], color="#0a6", alpha=0.15)
             ax.set_title("眼图")
-            ax.axis("equal")
+            # ax.axis("equal")
             ax.grid(alpha=0.3)
         else:
             ax.text(0.5, 0.5, "当前阶段暂无眼图数据", ha="center", va="center", transform=ax.transAxes)

@@ -1,0 +1,15 @@
+在通信系统的毕设仿真中，Signal processing（信号处理）是核心环节。首先，我们将输入的文本数据转换为比特流，然后进行 QAM 调制或 PSK 调制。在这个过程中，复数信号的实部和虚部代表了 I 路和 Q 路的幅值。
+
+经过调制的信号会进入 AWGN 信道，此时我们需要设置一个合理的 SNR（信噪比），比如 15dB。接着，接收端进行 matched filter（匹配滤波）和 down-sampling（下采样），最后通过解调还原出原始数据。
+
+在 Python 环境下编写代码时，经常会遇到一些奇怪的问题。比如，版本兼容性导致的 `TypeError: unsupported operand type(s) for |`，这是因为使用了 Python 3.10 才支持的联合类型注解 `np.ndarray | list[int]`。解决方法要么是升级 Python 版本，要么加上 `from __future__ import annotations`（注意它必须放在文件的最开头！）。
+
+界面开发方面，PyQt5 的多线程机制非常重要。如果直接在主线程运行耗时的仿真计算，UI 就会卡死。正确的做法是创建一个 QThread 和一个 Worker 对象，通过 `moveToThread()` 将 Worker 移入子线程。使用 `finished.connect()` 和 `failed.connect()` 信号来安全地更新主界面的图表，比如星座图和眼图。
+
+文件读写操作也充满陷阱。Windows 系统下的路径分隔符是反斜杠 `\`，在字符串中必须写成 `\\` 或者使用 raw string `r"E:\毕业设计\代码"`。如果遇到包含中文的路径，建议统一使用 UTF-8 编码：`open(file_path, 'r', encoding='utf-8')`，否则极易报出 `UnicodeDecodeError`。
+
+还有一些容易被忽视的标点符号差异。中文的逗号是“，”，句号是“。”，而英文的是 `,` 和 `.`。在编写正则表达式时，中英文符号的匹配规则完全不同。例如：匹配中文字符通常用 `[\u4e00-\u9fa5]`；而匹配英文单词则是 `\b[a-zA-Z]+\b`。
+
+此外，不同的数据结构也有不同的适用场景。`list` 适合动态增删，`tuple` 适合存储常量，`dict` 适合键值对映射，而 `numpy.ndarray` 则是数值计算的绝对主力。如果你试图对两个维度不匹配的 array 进行相加，会立刻触发 `ValueError: operands could not be broadcast together`。
+
+总结一下，完成一个完整的通信系统仿真 Demo，需要综合运用数字信号处理理论、Python 高级编程技巧以及 GUI 框架的底层机制。每一行代码、每一个标点符号（如括号 ()、方括号 []、花括号 {}）都可能决定程序的成败。请务必做好版本控制，定期 commit 你的代码到 Git 仓库！
