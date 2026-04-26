@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import gc
 from pathlib import Path
 
 import numpy as np
@@ -125,6 +126,7 @@ class MainWindow(QMainWindow):
         self.output_audio_path: str | None = None
         self.worker_thread: QThread | None = None
         self.worker: StepWorker | None = None
+        self._start_reentry_guard = False
         self.player = QMediaPlayer(self)
         self.timer = QTimer(self)
         self.timer.setInterval(250)
@@ -185,6 +187,21 @@ class MainWindow(QMainWindow):
             return
         half = total // 2
         self.right_splitter.setSizes([half, total - half])
+
+    def _cleanup_stale_async_state(self):
+        if self.worker_thread is not None and not self.worker_thread.isRunning():
+            self.worker_thread = None
+            self.worker = None
+
+    def _release_completed_run_resources(self):
+        # 释放上一轮可能残留的资源，避免多次运行后内存与句柄累积。
+        self.player.stop()
+        self.player.setMedia(QMediaContent())
+        if self.eye_dialog is not None and self.eye_dialog.isVisible():
+            self.eye_dialog.close()
+        self.eye_dialog = None
+        self.result = None
+        gc.collect()
 
     # 构建主界面左侧的”输入与预处理“参数面板
     def _build_source_box(self) -> QWidget:
@@ -447,20 +464,31 @@ class MainWindow(QMainWindow):
             self.metrics.clear()
 
     def _start_or_resume(self):
-        # 如果仿真正在运行或有步骤正在执行，则不执行任何操作
-        if self.timer.isActive() or self.worker_thread is not None:
+        if self._start_reentry_guard:
             return
-        if self.session is None or self.session.is_finished():
-            self._cleanup_temp_audio() # 清理之前的临时音频文件
-            self._reset_runtime_views() # 重置可视化区的显示状态
-            try:
-                self.session = self._collect_session()
-            except Exception as exc:
-                QMessageBox.critical(self, "参数错误", str(exc))
+        self._start_reentry_guard = True
+        try:
+            self._cleanup_stale_async_state()
+            # 如果仿真正在运行或有步骤正在执行，则不执行任何操作
+            if self.timer.isActive() or (self.worker_thread is not None and self.worker_thread.isRunning()):
+                self.statusBar().showMessage("仿真仍在运行，请等待当前步骤完成")
                 return
-        self.timer.start()
-        self._refresh_action_buttons()
-        self.statusBar().showMessage("仿真运行中")
+            if self.session is None or self.session.is_finished():
+                self._release_completed_run_resources()
+                self._cleanup_temp_audio() # 清理之前的临时音频文件
+                self._reset_runtime_views() # 重置可视化区的显示状态
+                try:
+                    self.session = self._collect_session()
+                except Exception as exc:
+                    QMessageBox.critical(self, "参数错误", str(exc))
+                    return
+            if self.timer.isActive():
+                self.timer.stop()
+            self.timer.start()
+            self._refresh_action_buttons()
+            self.statusBar().showMessage("仿真运行中")
+        finally:
+            self._start_reentry_guard = False
 
     def _pause(self):
         self.timer.stop()
@@ -485,6 +513,7 @@ class MainWindow(QMainWindow):
         self._run_step_async()
 
     def _run_step_async(self):
+        self._cleanup_stale_async_state()
         if self.session is None or self.worker_thread is not None:
             return
         self.worker_thread = QThread(self)
@@ -520,12 +549,14 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "执行失败", error)
 
     def _on_worker_thread_finished(self):
+        self._cleanup_stale_async_state()
         self.worker_thread = None
         self.worker = None
         self._refresh_action_buttons()
 
     def _refresh_action_buttons(self):
-        busy = self.worker_thread is not None
+        self._cleanup_stale_async_state()
+        busy = self.worker_thread is not None and self.worker_thread.isRunning()
         self.start_button.setEnabled(not busy and not self.timer.isActive())
         self.step_button.setEnabled(not busy)
         self.reset_button.setEnabled(not busy)
@@ -642,7 +673,7 @@ class MainWindow(QMainWindow):
         else:
             ax2.text(0.5, 0.5, "当前结果没有恢复语音", ha="center", va="center", transform=ax2.transAxes)
             ax2.set_axis_off()
-        self.media_wave_canvas.draw()
+        self.media_wave_canvas.draw_idle()
 
     def _draw_idle_views(self):
         bit_fig = self.bit_canvas.figure
@@ -651,7 +682,7 @@ class MainWindow(QMainWindow):
         ax.text(0.5, 0.5, "运行仿真后显示比特序列", ha="center", va="center", transform=ax.transAxes)
         ax.set_title("比特序列")
         ax.set_axis_off()
-        self.bit_canvas.draw()
+        self.bit_canvas.draw_idle()
 
         signal_fig = self.signal_canvas.figure
         signal_fig.clear()
@@ -660,7 +691,7 @@ class MainWindow(QMainWindow):
         ax2.text(0.5, 0.5, "运行到成型调制后显示频域频谱", ha="center", va="center", transform=ax2.transAxes)
         ax1.set_axis_off()
         ax2.set_axis_off()
-        self.signal_canvas.draw()
+        self.signal_canvas.draw_idle()
 
         const_fig = self.const_canvas.figure
         const_fig.clear()
@@ -668,7 +699,7 @@ class MainWindow(QMainWindow):
         ax.text(0.5, 0.5, "运行到成型调制后显示星座图", ha="center", va="center", transform=ax.transAxes)
         ax.set_title("星座图")
         ax.set_axis_off()
-        self.const_canvas.draw()
+        self.const_canvas.draw_idle()
 
         eye_fig = self.eye_canvas.figure
         eye_fig.clear()
@@ -676,7 +707,7 @@ class MainWindow(QMainWindow):
         ax.text(0.5, 0.5, "运行到匹配滤波与判决后显示眼图", ha="center", va="center", transform=ax.transAxes)
         ax.set_title("眼图")
         ax.set_axis_off()
-        self.eye_canvas.draw()
+        self.eye_canvas.draw_idle()
 
     def _redraw_views(self):
         if self.result is None:
@@ -742,7 +773,7 @@ class MainWindow(QMainWindow):
         else:
             ax.text(0.5, 0.5, "当前阶段暂无该比特数据", ha="center", va="center", transform=ax.transAxes)
             ax.set_axis_off()
-        self.bit_canvas.draw()
+        self.bit_canvas.draw_idle()
 
         # 画出信号的时域波形和频域频谱
         signal_fig = self.signal_canvas.figure
@@ -767,7 +798,7 @@ class MainWindow(QMainWindow):
             ax1.text(0.5, 0.5, "当前阶段暂无该信号数据", ha="center", va="center", transform=ax1.transAxes)
             ax1.set_axis_off()
             ax2.set_axis_off()
-        self.signal_canvas.draw()
+        self.signal_canvas.draw_idle()
 
         # 画出星座图，发送符号和接收采样分别用不同的颜色表示
         const_fig = self.const_canvas.figure
@@ -788,7 +819,7 @@ class MainWindow(QMainWindow):
         else:
             ax.text(0.5, 0.5, "当前阶段暂无星座数据", ha="center", va="center", transform=ax.transAxes)
             ax.set_axis_off()
-        self.const_canvas.draw()
+        self.const_canvas.draw_idle()
 
         eye_fig = self.eye_canvas.figure
         eye_fig.clear()
@@ -805,7 +836,7 @@ class MainWindow(QMainWindow):
         else:
             ax.text(0.5, 0.5, "当前阶段暂无眼图数据", ha="center", va="center", transform=ax.transAxes)
             ax.set_axis_off()
-        self.eye_canvas.draw()
+        self.eye_canvas.draw_idle()
 
     def _play_audio(self, path: str | None):
         if not path or not Path(path).exists():
@@ -819,6 +850,8 @@ class MainWindow(QMainWindow):
         if self.result is None:
             QMessageBox.information(self, "提示", "请先运行一次完整仿真。")
             return
+        if self.eye_dialog is not None and self.eye_dialog.isVisible():
+            self.eye_dialog.close()
         self.eye_dialog = EyeDialog(self.result.matched_signal, len(self.result.pulse))
         self.eye_dialog.show()
 
@@ -856,6 +889,8 @@ class MainWindow(QMainWindow):
         self._draw_idle_views()
 
     def _cleanup_temp_audio(self):
+        self.player.stop()
+        self.player.setMedia(QMediaContent())
         for attr in ["input_audio_path", "output_audio_path"]:
             path = getattr(self, attr)
             if path and Path(path).exists():
@@ -866,7 +901,8 @@ class MainWindow(QMainWindow):
             setattr(self, attr, None)
 
     def _reset(self):
-        if self.worker_thread is not None:
+        self._cleanup_stale_async_state()
+        if self.worker_thread is not None and self.worker_thread.isRunning():
             QMessageBox.information(self, "提示", "当前步骤仍在执行，请等待完成后再重置。")
             return
         self.timer.stop()
