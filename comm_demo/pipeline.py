@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import math
+import time
 import wave
 import zlib
 from bisect import bisect_right
@@ -115,6 +116,7 @@ class SimulationResult:
     history: list[str] = field(default_factory=list)
     crc_ok: bool | None = None          # 是否使用CRC
     gray_ok:bool | None = None          # 是否使用格雷编码
+    stage_times: dict[str, float] = field(default_factory=dict)
 
     @property
     def summary(self) -> str:
@@ -206,6 +208,7 @@ class SimulationSession:
     rx_channel_bits: np.ndarray | None = None
     decoded_source_bits: np.ndarray | None = None
     restored_bytes: bytes | None = None
+    stage_times: dict[str, float] = field(default_factory=dict)
 
     def is_finished(self) -> bool:
         """检查是否已完成所有阶段"""
@@ -222,6 +225,8 @@ class SimulationSession:
         返回执行结果的描述字符串
     """
     def step(self) -> str:
+        stage_name = self.next_stage()
+        tick = time.perf_counter()
         if self.stage_index == 0:
             self.source = prepare_source(self.config.kind, self.config.text, self.config.path)
             self.source_bits = bytes_to_bits(self.source.raw_bytes)
@@ -269,6 +274,9 @@ class SimulationSession:
             message = "完成信源解码与数据恢复"
         else:
             return "已完成"
+        elapsed = time.perf_counter() - tick
+        self.stage_times[stage_name] = elapsed
+        print(f"[pipeline] {stage_name}: {elapsed * 1000:.2f} ms")
         self.stage_index += 1
         self.history.append(f"{self.stage_index}. {message}")
         return self.history[-1]
@@ -308,6 +316,7 @@ class SimulationSession:
             ber=ber,
             history=self.history.copy(),
             crc_ok=self.channel_meta.get("crc_ok") if self.channel_meta else None,
+            stage_times=self.stage_times.copy(),
         )
 
 
@@ -710,21 +719,56 @@ def source_encode(data: bytes, method: str) -> tuple[np.ndarray, dict]:
         meta["method"] = method   # 记录使用的方法名
         return bits, meta
     codes = build_huffman_codes(data) if method == "哈夫曼编码" else build_shannon_fano_codes(data)
-    bits = np.array([int(bit) for byte in data for bit in codes[byte]], dtype=np.uint8)
+    bit_string = "".join(codes[byte] for byte in data)
+    if bit_string:
+        bits = (np.frombuffer(bit_string.encode("ascii"), dtype=np.uint8) - ord("0")).astype(np.uint8, copy=False)
+    else:
+        bits = np.zeros(0, dtype=np.uint8)
     return bits, {"method": method, "codes": codes, "length": len(data)}
 
 
 def source_decode(bits: np.ndarray, meta: dict, method: str) -> bytes:
     if method == "算术编码":
         return ArithmeticCoder.decode(bits, meta)
-    reverse = {code: symbol for symbol, code in meta["codes"].items()}
-    current = ""
+    # 将码表转换为二叉前缀树，避免逐 bit 字符串拼接和哈希查找。
+    codes = meta["codes"]
+    left: list[int] = [-1]
+    right: list[int] = [-1]
+    symbol_at: list[int] = [-1]
+    for symbol, code in codes.items():
+        node = 0
+        for token in code:
+            if token == "0":
+                nxt = left[node]
+                if nxt < 0:
+                    nxt = len(left)
+                    left[node] = nxt
+                    left.append(-1)
+                    right.append(-1)
+                    symbol_at.append(-1)
+                node = nxt
+            else:
+                nxt = right[node]
+                if nxt < 0:
+                    nxt = len(left)
+                    right[node] = nxt
+                    left.append(-1)
+                    right.append(-1)
+                    symbol_at.append(-1)
+                node = nxt
+        symbol_at[node] = int(symbol)
+
+    bit_stream = np.asarray(bits, dtype=np.uint8).reshape(-1)
+    node = 0
     out = bytearray()
-    for bit in bits.tolist():
-        current += str(int(bit))
-        if current in reverse:
-            out.append(reverse[current])
-            current = ""
+    for bit in bit_stream:
+        node = left[node] if int(bit) == 0 else right[node]
+        if node < 0:
+            break
+        symbol = symbol_at[node]
+        if symbol >= 0:
+            out.append(symbol)
+            node = 0
             if len(out) == meta["length"]:
                 break
     return bytes(out)
@@ -800,57 +844,86 @@ def hamming74_decode(bits: np.ndarray, original_len: int) -> np.ndarray:
 
 
 def convolutional_encode(bits: np.ndarray) -> np.ndarray:
-    state = [0, 0]
-    out: list[int] = []
-    tail = np.zeros(2, dtype=np.uint8)
-    for bit in np.r_[bits, tail]:
-        u = int(bit)
-        out1 = u ^ state[0] ^ state[1]
-        out2 = u ^ state[1]
-        out.extend([out1, out2])
-        state = [u, state[0]]
-    return np.array(out, dtype=np.uint8)
+    data = np.asarray(bits, dtype=np.uint8).reshape(-1)
+    u = np.concatenate([data, np.zeros(2, dtype=np.uint8)])
+    prev1 = np.concatenate([np.zeros(1, dtype=np.uint8), u[:-1]])
+    prev2 = np.concatenate([np.zeros(2, dtype=np.uint8), u[:-2]])
+    out1 = np.bitwise_xor(np.bitwise_xor(u, prev1), prev2)
+    out2 = np.bitwise_xor(u, prev2)
+    out = np.empty(u.size * 2, dtype=np.uint8)
+    out[0::2] = out1
+    out[1::2] = out2
+    return out
 
 
 def viterbi_decode(bits: np.ndarray, original_len: int) -> np.ndarray:
-    if len(bits) % 2:
-        bits = bits[:-1]
-    transitions: dict[tuple[int, int], tuple[int, tuple[int, int]]] = {}
-    for state in range(4):
-        m1 = (state >> 1) & 1
-        m2 = state & 1
-        for u in (0, 1):
-            next_state = ((u << 1) | m1) & 0b11
-            transitions[(state, u)] = (next_state, (u ^ m1 ^ m2, u ^ m2))
-    steps = len(bits) // 2
-    prev_state = np.full((steps, 4), -1, dtype=np.int8)
-    decision = np.zeros((steps, 4), dtype=np.uint8)
-    metrics = np.full(4, np.inf)
-    metrics[0] = 0.0
+    data = np.asarray(bits, dtype=np.uint8).reshape(-1)
+    if data.size % 2:
+        data = data[:-1]
+    steps = data.size // 2
+    if steps == 0:
+        return np.zeros(0, dtype=np.uint8)
+
+    symbols = data.reshape(-1, 2)
+    prev_state = np.empty((steps, 4), dtype=np.int8)
+    inf = 1 << 30
+    m0, m1, m2, m3 = 0, inf, inf, inf
 
     for step in range(steps):
-        symbol = bits[step * 2 : step * 2 + 2]
-        new_metrics = np.full(4, np.inf)
-        for state in range(4):
-            if not np.isfinite(metrics[state]):
-                continue
-            for u in (0, 1):
-                next_state, expected = transitions[(state, u)]
-                distance = int(expected[0] != symbol[0]) + int(expected[1] != symbol[1])
-                score = metrics[state] + distance
-                if score < new_metrics[next_state]:
-                    new_metrics[next_state] = score
-                    prev_state[step, next_state] = state
-                    decision[step, next_state] = u
-        metrics = new_metrics
+        b0 = int(symbols[step, 0])
+        b1 = int(symbols[step, 1])
+        d00 = b0 + b1
+        d11 = (1 - b0) + (1 - b1)
+        d10 = (1 - b0) + b1
+        d01 = b0 + (1 - b1)
 
-    state = 0 if np.isfinite(metrics[0]) else int(np.argmin(metrics))
-    decoded = np.zeros(steps, dtype=np.uint8)
+        c00 = m0 + d00
+        c10 = m1 + d11
+        if c00 <= c10:
+            n0, p0 = c00, 0
+        else:
+            n0, p0 = c10, 1
+
+        c01 = m2 + d10
+        c11 = m3 + d01
+        if c01 <= c11:
+            n1, p1 = c01, 2
+        else:
+            n1, p1 = c11, 3
+
+        c02 = m0 + d11
+        c12 = m1 + d00
+        if c02 <= c12:
+            n2, p2 = c02, 0
+        else:
+            n2, p2 = c12, 1
+
+        c03 = m2 + d01
+        c13 = m3 + d10
+        if c03 <= c13:
+            n3, p3 = c03, 2
+        else:
+            n3, p3 = c13, 3
+
+        m0, m1, m2, m3 = n0, n1, n2, n3
+        prev_state[step, 0] = p0
+        prev_state[step, 1] = p1
+        prev_state[step, 2] = p2
+        prev_state[step, 3] = p3
+
+    state = 0
+    best_metric = m0
+    if m1 < best_metric:
+        state, best_metric = 1, m1
+    if m2 < best_metric:
+        state, best_metric = 2, m2
+    if m3 < best_metric:
+        state = 3
+
+    decoded = np.empty(steps, dtype=np.uint8)
     for step in range(steps - 1, -1, -1):
-        decoded[step] = decision[step, state]
-        state = prev_state[step, state]
-        if state < 0:
-            state = 0
+        decoded[step] = (state >> 1) & 1
+        state = int(prev_state[step, state])
     return decoded[:original_len]
 
 """
@@ -1031,10 +1104,14 @@ def _detect_nearest_points(equalized: np.ndarray, points: np.ndarray) -> np.ndar
     if len(equalized) == 0:
         return np.zeros(0, dtype=np.int32)
     indices = np.empty(len(equalized), dtype=np.int32)
+    pr = np.real(points).astype(np.float32, copy=False)
+    pi = np.imag(points).astype(np.float32, copy=False)
     for start in range(0, len(equalized), DETECTION_CHUNK_SIZE):
         block = equalized[start : start + DETECTION_CHUNK_SIZE]
-        distances = np.abs(block[:, None] - points[None, :])
-        indices[start : start + len(block)] = np.argmin(distances, axis=1).astype(np.int32, copy=False)
+        br = np.real(block).astype(np.float32, copy=False)
+        bi = np.imag(block).astype(np.float32, copy=False)
+        dist2 = (br[:, None] - pr[None, :]) ** 2 + (bi[:, None] - pi[None, :]) ** 2
+        indices[start : start + len(block)] = np.argmin(dist2, axis=1).astype(np.int32, copy=False)
     return indices
 
 def demodulate(

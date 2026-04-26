@@ -794,7 +794,8 @@ class MainWindow(QMainWindow):
         eye_fig.clear()
         ax = eye_fig.subplots(1, 1)
         if matched_signal is not None and len(matched_signal) > 0:
-            signal = np.real(matched_signal)
+            # signal = np.real(matched_signal)
+            signal = np.real(matched_signal[: 400 * SPS])
             span = 2 * SPS
             for index in range(len(self.session.pulse) - 1, max(0, len(signal) - span), SPS):
                 ax.plot(signal[index : index + span], color="#0a6", alpha=0.15)
