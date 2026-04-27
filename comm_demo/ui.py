@@ -120,6 +120,14 @@ def _downsample_for_plot(signal: np.ndarray, max_points: int) -> np.ndarray:
     return signal[::step]
 
 
+def _random_sample_for_plot(signal: np.ndarray, max_points: int, seed: int = 20240518) -> np.ndarray:
+    if signal is None or len(signal) <= max_points:
+        return signal
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(len(signal), size=max_points, replace=False)
+    return signal[np.sort(indices)]
+
+
 def _welch_spectrum_db(
     signal: np.ndarray,
     nfft: int = ANALYSIS_NFFT,
@@ -167,7 +175,8 @@ class EyeDialog(QMainWindow):
         self.setCentralWidget(canvas)
         axis = canvas.figure.subplots(1, 1)
         span = 2 * SPS
-        signal = np.real(matched_signal[: 400 * SPS])
+        steady = _center_window(np.asarray(matched_signal), 400 * SPS)
+        signal = np.real(steady)
         for index in range(pulse_length - 1, max(0, len(signal) - span), SPS):
             axis.plot(signal[index : index + span], color="#0a6", alpha=0.15)
         axis.set_title("眼图")
@@ -875,10 +884,10 @@ class MainWindow(QMainWindow):
         const_fig.clear()
         ax = const_fig.subplots(1, 1)
         if tx_symbols is not None and len(tx_symbols) > 0:
-            tx = tx_symbols[:500]
+            tx = _random_sample_for_plot(np.asarray(tx_symbols), 500, seed=20240518)
             ax.scatter(np.real(tx), np.imag(tx), s=12, alpha=0.6, label="发送符号")
             if sampled_symbols is not None and len(sampled_symbols) > 0:
-                rx = sampled_symbols[:500]
+                rx = _random_sample_for_plot(np.asarray(sampled_symbols), 500, seed=20240519)
                 ax.scatter(np.real(rx), np.imag(rx), s=12, alpha=0.6, label="接收采样")
             ax.set_title("星座图")
             ax.set_xlabel("I")
@@ -895,8 +904,8 @@ class MainWindow(QMainWindow):
         eye_fig.clear()
         ax = eye_fig.subplots(1, 1)
         if matched_signal is not None and len(matched_signal) > 0:
-            # signal = np.real(matched_signal)
-            signal = np.real(matched_signal[: 400 * SPS])
+            steady = _center_window(np.asarray(matched_signal), 400 * SPS)
+            signal = np.real(steady)
             span = 2 * SPS
             for index in range(len(self.session.pulse) - 1, max(0, len(signal) - span), SPS):
                 ax.plot(signal[index : index + span], color="#0a6", alpha=0.15)
