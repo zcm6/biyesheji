@@ -446,7 +446,7 @@ class MainWindow(QMainWindow):
         self.eye_canvas = PlotCanvas()
         for title, canvas in [
             ("比特序列", self.bit_canvas),
-            ("时域/频域", self.signal_canvas),
+            ("时域/功率谱", self.signal_canvas),
             ("星座图", self.const_canvas),
             ("眼图", self.eye_canvas),
         ]:
@@ -749,7 +749,7 @@ class MainWindow(QMainWindow):
         signal_fig.clear()
         ax1, ax2 = signal_fig.subplots(2, 1)
         ax1.text(0.5, 0.5, "运行到成型调制后显示时域波形", ha="center", va="center", transform=ax1.transAxes)
-        ax2.text(0.5, 0.5, "运行到成型调制后显示频域频谱", ha="center", va="center", transform=ax2.transAxes)
+        ax2.text(0.5, 0.5, "运行到成型调制后显示功率谱", ha="center", va="center", transform=ax2.transAxes)
         ax1.set_axis_off()
         ax2.set_axis_off()
         self.signal_canvas.draw_idle()
