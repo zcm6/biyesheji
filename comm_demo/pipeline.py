@@ -53,6 +53,7 @@ class SourceArtifact:
     audio_samples: np.ndarray | None = None
     sample_rate: int = 0
     audio_wav_bytes: bytes | None = None
+    media_meta: dict[str, int] | None = None
 
 
 """
@@ -289,7 +290,7 @@ class SimulationSession:
 
     def build_result(self) -> SimulationResult:
         restored_text, restored_image, restored_audio_samples, restored_audio_rate, restored_audio_wav = restore_output(
-            self.source.kind, self.restored_bytes or b""
+            self.source.kind, self.restored_bytes or b"", self.source.media_meta
         )
         compare_len = min(len(self.source_coded_bits), len(self.decoded_source_bits))
         ber = float(np.mean(self.source_coded_bits[:compare_len] != self.decoded_source_bits[:compare_len])) if compare_len else 0.0
@@ -555,40 +556,59 @@ def graydecode(side: int, dim_width: int, detected_indices : np.ndarray) -> np.n
            - np.ndarray: 转换后的灰度像素矩阵，形状为 (高, 宽)，数据类型为 uint8。
 """
 def pack_image_data(image: Image.Image) -> tuple[bytes, np.ndarray]:
-    gray = image.convert("L")    # 将图片转换为灰度图
-    pixels = np.array(gray, dtype=np.uint8)   # 将灰度图像转换成二维矩阵
-    """生成图片大小的8字节的头部信息"""
-    header = gray.size[0].to_bytes(4, "big") + gray.size[1].to_bytes(4, "big")
-    return header + pixels.tobytes(), pixels
+    gray = image.convert("L")
+    pixels = np.array(gray, dtype=np.uint8)
+    # 元数据在带外传递；信道仅携带有效载荷。
+    return pixels.tobytes(), pixels
 
 
-def unpack_image_data(data: bytes) -> np.ndarray:
-    if len(data) < 8:
-        raise ValueError("图像数据长度不足。")
-    width = int.from_bytes(data[:4], "big")
-    height = int.from_bytes(data[4:8], "big")
-    pixels = np.frombuffer(data[8:], dtype=np.uint8)
-    if len(pixels) != width * height:
-        raise ValueError("图像数据损坏。")
-    return pixels.reshape(height, width).copy()
+def unpack_image_data(data: bytes, metadata: dict[str, int] | None = None) -> np.ndarray:
+    if metadata is None:
+        if len(data) < 8:
+            raise ValueError("image data too short")
+        width = int.from_bytes(data[:4], "big")
+        height = int.from_bytes(data[4:8], "big")
+        payload = data[8:]
+    else:
+        width = int(metadata.get("width", 0))
+        height = int(metadata.get("height", 0))
+        payload = data
+    if width <= 0 or height <= 0:
+        raise ValueError("invalid image metadata")
+    total = width * height
+    pixels = np.frombuffer(payload, dtype=np.uint8).copy()
+    if len(pixels) < total:
+        pixels = np.concatenate([pixels, np.zeros(total - len(pixels), dtype=np.uint8)])
+    elif len(pixels) > total:
+        pixels = pixels[:total]
+    return pixels.reshape(height, width)
 
 
 def pack_audio_data(samples: np.ndarray, sample_rate: int) -> bytes:
     mono = samples.astype(np.int16)
     quantized = np.clip(np.round(mono / 256.0), -128, 127).astype(np.int8)
-    header = sample_rate.to_bytes(4, "big") + len(quantized).to_bytes(4, "big")
-    return header + quantized.tobytes()
+    # Metadata is passed out-of-band; channel carries payload only.
+    return quantized.tobytes()
 
 
-def unpack_audio_data(data: bytes) -> tuple[int, np.ndarray]:
-    if len(data) < 8:
-        raise ValueError("语音数据长度不足。")
-    sample_rate = int.from_bytes(data[:4], "big")
-    count = int.from_bytes(data[4:8], "big")
-    payload = data[8:]
-    quantized = np.frombuffer(payload[:count], dtype=np.int8).copy()
-    if len(quantized) != count:
-        raise ValueError("语音数据损坏。")
+def unpack_audio_data(data: bytes, metadata: dict[str, int] | None = None) -> tuple[int, np.ndarray]:
+    if metadata is None:
+        if len(data) < 8:
+            raise ValueError("audio data too short")
+        sample_rate = int.from_bytes(data[:4], "big")
+        count = int.from_bytes(data[4:8], "big")
+        payload = data[8:]
+    else:
+        sample_rate = int(metadata.get("sample_rate", 0))
+        count = int(metadata.get("count", 0))
+        payload = data
+    if sample_rate <= 0 or count < 0:
+        raise ValueError("invalid audio metadata")
+    quantized = np.frombuffer(payload, dtype=np.int8).copy()
+    if len(quantized) < count:
+        quantized = np.concatenate([quantized, np.zeros(count - len(quantized), dtype=np.int8)])
+    elif len(quantized) > count:
+        quantized = quantized[:count]
     samples = (quantized.astype(np.int16) * 256).astype(np.int16)
     return sample_rate, samples
 
@@ -623,6 +643,7 @@ def prepare_source(kind: str, text: str, path: str) -> SourceArtifact:
             raw_bytes=raw_bytes,
             preview_text=f"{file_path.name}\n尺寸: {pixels.shape[1]} x {pixels.shape[0]}",
             image_array=pixels,
+            media_meta={"width": int(pixels.shape[1]), "height": int(pixels.shape[0])},
         )
     with wave.open(str(file_path), "rb") as wav_file:
         if wav_file.getsampwidth() != 2:
@@ -639,6 +660,7 @@ def prepare_source(kind: str, text: str, path: str) -> SourceArtifact:
             audio_samples=samples.astype(np.float32),
             sample_rate=wav_file.getframerate(),
             audio_wav_bytes=pcm_to_wav_bytes(samples, wav_file.getframerate()),
+            media_meta={"sample_rate": int(wav_file.getframerate()), "count": int(len(samples))},
         )
 
 
@@ -1179,17 +1201,19 @@ def demodulate(
     return matched, equalized, points[detected_indices], bits
 
 
-def restore_output(kind: str, restored_bytes: bytes) -> tuple[str, np.ndarray | None, np.ndarray | None, int, bytes | None]:
+def restore_output(
+    kind: str, restored_bytes: bytes, metadata: dict[str, int] | None = None
+) -> tuple[str, np.ndarray | None, np.ndarray | None, int, bytes | None]:
     if kind == "文本":
         return restored_bytes.decode("utf-8", errors="replace"), None, None, 0, None
     if kind == "图像":
         try:
-            image = unpack_image_data(restored_bytes)
+            image = unpack_image_data(restored_bytes, metadata)
             return f"图像恢复成功\n尺寸: {image.shape[1]} x {image.shape[0]}", image, None, 0, None
         except Exception:
             return "图像恢复失败，可能由信道误码导致。", None, None, 0, None
     try:
-        sample_rate, samples = unpack_audio_data(restored_bytes)
+        sample_rate, samples = unpack_audio_data(restored_bytes, metadata)
         wav_bytes = pcm_to_wav_bytes(samples, sample_rate)
         return f"语音恢复完成\n采样率: {sample_rate} Hz\n采样点数: {len(samples)}", None, samples.astype(np.float32), sample_rate, wav_bytes
     except Exception:
