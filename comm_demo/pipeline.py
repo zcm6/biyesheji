@@ -986,6 +986,14 @@ def root_raised_cosine(beta: float, span_symbols: int = DEFAULT_SPAN, sps: int =
     pulse /= np.sqrt(np.sum(np.abs(pulse) ** 2, dtype=np.float64)).astype(np.float32)
     return pulse.astype(np.float32)
 
+
+def _scramble_mask(length: int) -> np.ndarray:
+    if length <= 0:
+        return np.zeros(0, dtype=np.uint8)
+    # Deterministic pseudo-random binary sequence for data whitening.
+    rng = np.random.default_rng(20240518)
+    return rng.integers(0, 2, size=length, dtype=np.uint8)
+
 """
     根据调制方式和阶数生成标准化的星座图坐标点。
 
@@ -1038,6 +1046,9 @@ def constellation(modulation: str, order: int) -> np.ndarray:
 def modulate(
     bits: np.ndarray, modulation: str, order: int, roll_off: float, gray_ok: bool = False
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    bits = np.asarray(bits, dtype=np.uint8).reshape(-1)
+    if bits.size:
+        bits = np.bitwise_xor(bits, _scramble_mask(len(bits)))
     width = int(round(math.log2(order)))     # 计算每个符号包含几个比特
     """比特对齐"""
     if len(bits) % width:
@@ -1141,6 +1152,8 @@ def demodulate(
     else:
         bits = ints_to_bits(detected_indices, width)
     bits = bits[:expected_bits]
+    if bits.size:
+        bits = np.bitwise_xor(bits.astype(np.uint8, copy=False), _scramble_mask(len(bits)))
     return matched, sampled, points[detected_indices], bits
 
 
