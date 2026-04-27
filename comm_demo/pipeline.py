@@ -587,7 +587,7 @@ def unpack_image_data(data: bytes, metadata: dict[str, int] | None = None) -> np
 def pack_audio_data(samples: np.ndarray, sample_rate: int) -> bytes:
     mono = samples.astype(np.int16)
     quantized = np.clip(np.round(mono / 256.0), -128, 127).astype(np.int8)
-    # Metadata is passed out-of-band; channel carries payload only.
+    #元数据在带外传递；信道仅携带有效载荷。
     return quantized.tobytes()
 
 
@@ -1013,7 +1013,7 @@ def root_raised_cosine(beta: float, span_symbols: int = DEFAULT_SPAN, sps: int =
 def _scramble_mask(length: int) -> np.ndarray:
     if length <= 0:
         return np.zeros(0, dtype=np.uint8)
-    # Deterministic pseudo-random binary sequence for data whitening.
+    # 用于数据白化的确定性伪随机二进制序列。
     rng = np.random.default_rng(20240518)
     return rng.integers(0, 2, size=length, dtype=np.uint8)
 

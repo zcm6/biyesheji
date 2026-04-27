@@ -39,6 +39,13 @@ from PyQt5.QtWidgets import (
 
 from comm_demo.pipeline import DEFAULT_TEXT, SPS, SimulationResult, SimulationSession, create_session
 
+ANALYSIS_TIME_WINDOW = 4000
+ANALYSIS_TIME_PLOT_POINTS = 600
+ANALYSIS_FREQ_WINDOW = 16384
+ANALYSIS_WELCH_SEGMENT = 2048
+ANALYSIS_WELCH_OVERLAP = 1024
+ANALYSIS_NFFT = 8192
+
 # 将NumPy数组（灰度图像数据）转换为PyQt的QPixmap，以便在图形界面显示图像
 def array_to_pixmap(array: np.ndarray) -> QPixmap:
     image = np.ascontiguousarray(array.astype(np.uint8))
@@ -95,6 +102,60 @@ def configure_plot_fonts(preferred_fonts: list[str]) -> None:
     rcParams["font.family"] = ["sans-serif"]
     rcParams["font.sans-serif"] = usable + [family for family in existing if family not in usable]
     rcParams["axes.unicode_minus"] = False
+
+
+def _center_window(signal: np.ndarray, length: int) -> np.ndarray:
+    if signal is None or len(signal) == 0:
+        return np.zeros(0, dtype=np.complex64)
+    if len(signal) <= length:
+        return signal
+    start = max(0, (len(signal) - length) // 2)
+    return signal[start : start + length]
+
+
+def _downsample_for_plot(signal: np.ndarray, max_points: int) -> np.ndarray:
+    if signal is None or len(signal) <= max_points:
+        return signal
+    step = int(np.ceil(len(signal) / max_points))
+    return signal[::step]
+
+
+def _welch_spectrum_db(
+    signal: np.ndarray,
+    nfft: int = ANALYSIS_NFFT,
+    segment_len: int = ANALYSIS_WELCH_SEGMENT,
+    overlap: int = ANALYSIS_WELCH_OVERLAP,
+) -> tuple[np.ndarray, np.ndarray]:
+    x = np.asarray(signal)
+    if x.size == 0:
+        return np.linspace(-0.5, 0.5, nfft, endpoint=False), np.full(nfft, -120.0, dtype=np.float32)
+
+    if x.size < segment_len:
+        padded = np.zeros(segment_len, dtype=np.complex64)
+        padded[: x.size] = x
+        x = padded
+
+    hop = max(1, segment_len - overlap)
+    window = np.hanning(segment_len).astype(np.float32)
+    window_energy = float(np.sum(window * window) + 1e-12)
+
+    pxx = np.zeros(nfft, dtype=np.float64)
+    segments = 0
+    for start in range(0, x.size - segment_len + 1, hop):
+        seg = x[start : start + segment_len]
+        spec = np.fft.fftshift(np.fft.fft(seg * window, n=nfft))
+        pxx += (np.abs(spec) ** 2) / window_energy
+        segments += 1
+
+    if segments == 0:
+        spec = np.fft.fftshift(np.fft.fft(x[:segment_len] * window, n=nfft))
+        pxx = (np.abs(spec) ** 2) / window_energy
+    else:
+        pxx /= segments
+
+    freq = np.linspace(-0.5, 0.5, nfft, endpoint=False)
+    db = 10 * np.log10(pxx + 1e-12)
+    return freq, db.astype(np.float32, copy=False)
 
 """显示独立的眼图绘制窗口"""
 class EyeDialog(QMainWindow):
@@ -781,16 +842,25 @@ class MainWindow(QMainWindow):
         ax1, ax2 = signal_fig.subplots(2, 1)
         selected_signal = signal_views.get(self.signal_selector.currentText())
         if selected_signal is not None and len(selected_signal) > 0:
-            count = min(600, len(selected_signal))
-            ax1.plot(np.real(selected_signal[:count]), label="实部") # 画出实部波形
-            if np.max(np.abs(np.imag(selected_signal[:count]))) > 1e-9:
-                ax1.plot(np.imag(selected_signal[:count]), label="虚部", alpha=0.8) # 如果虚部不全为零，则画出虚部波形
+            # Analysis-mode rendering: use a center steady-state window for time domain.
+            steady_signal = _center_window(np.asarray(selected_signal), ANALYSIS_TIME_WINDOW)
+            display_signal = _downsample_for_plot(steady_signal, ANALYSIS_TIME_PLOT_POINTS)
+            ax1.plot(np.real(display_signal), label="实部")
+            if np.max(np.abs(np.imag(display_signal))) > 1e-9:
+                ax1.plot(np.imag(display_signal), label="虚部", alpha=0.8)
             ax1.set_title(f"{self.signal_selector.currentText()}时域波形")
             ax1.grid(alpha=0.3)
             ax1.legend()
-            spectrum = np.fft.fftshift(np.fft.fft(selected_signal[: min(len(selected_signal), 4096)], n=2048))
-            freq = np.linspace(-0.5, 0.5, len(spectrum))
-            ax2.plot(freq, 20 * np.log10(np.abs(spectrum) + 1e-9))
+
+            # Frequency-domain view uses Welch averaging on a longer center window.
+            freq_input = _center_window(np.asarray(selected_signal), ANALYSIS_FREQ_WINDOW)
+            freq, spectrum_db = _welch_spectrum_db(
+                freq_input,
+                nfft=ANALYSIS_NFFT,
+                segment_len=ANALYSIS_WELCH_SEGMENT,
+                overlap=ANALYSIS_WELCH_OVERLAP,
+            )
+            ax2.plot(freq, spectrum_db)
             ax2.set_title(f"{self.signal_selector.currentText()}频谱")
             # ax.axis("equal")
             ax2.grid(alpha=0.3)
