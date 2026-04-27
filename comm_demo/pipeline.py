@@ -249,6 +249,7 @@ class SimulationSession:
                 self.config.channel_name,
                 self.config.snr_db,
                 self.config.k_factor,
+                self.pulse,
             )
             message = f"完成信道传输：{self.config.channel_name}"
         elif self.stage_index == 5:
@@ -1076,6 +1077,7 @@ def apply_channel(
     channel_name: str,
     snr_db: float,
     k_factor: float,
+    pulse: np.ndarray | None = None
 ) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng()
     fading = np.ones(len(tx_symbols), dtype=np.complex64)
@@ -1087,12 +1089,26 @@ def apply_channel(
         fading = (
             los + scatter * (rng.normal(size=len(tx_symbols)) + 1j * rng.normal(size=len(tx_symbols))) / np.sqrt(2)
         ).astype(np.complex64)
-    fading_samples = np.repeat(fading, SPS)
-    if len(fading_samples) < len(tx_signal):
-        fading_samples = np.r_[fading_samples, np.repeat(fading[-1], len(tx_signal) - len(fading_samples))]
-    rx = tx_signal * fading_samples[: len(tx_signal)]
+    if len(fading):
+        fading /= np.sqrt(np.mean(np.abs(fading) ** 2, dtype=np.float64) + 1e-12).astype(np.float32, copy = False)
+
+    if channel_name == "AWGN":
+        rx = tx_signal.astype(np.complex64, copy=False)
+    elif pulse is not None:
+        upsampled = np.zeros(len(tx_symbols) * SPS, dtype=np.complex64)
+        upsampled[::SPS] = (tx_symbols * fading).astype(np.complex64, copy=False)
+        rx = np.convolve(upsampled, pulse.astype(np.float32), mode="full").astype(np.complex64)
+        if len(rx) > len(tx_signal):
+            rx = rx[: len(tx_signal)]
+        elif len(rx) < len(tx_signal):
+            rx = np.r_[rx, np.zeros(len(tx_signal) - len(rx), dtype=np.complex64)]
+    else:
+        fading_samples = np.repeat(fading, SPS)
+        if len(fading_samples) < len(tx_signal):
+            fading_samples = np.r_[fading_samples, np.repeat(fading[-1], len(tx_signal) - len(fading_samples))]
+        rx = tx_signal * fading_samples[: len(tx_signal)]
     power = np.mean(np.abs(rx) ** 2, dtype=np.float64) + 1e-12
-    noise_power = power * SPS / (10 ** (snr_db / 10))
+    noise_power = power / (10 ** (snr_db / 10))
     noise = rng.normal(scale=np.sqrt(noise_power / 2), size=len(rx)) + 1j * rng.normal(
         scale=np.sqrt(noise_power / 2), size=len(rx)
     )
@@ -1138,7 +1154,13 @@ def demodulate(
     sample_start = len(pulse) - 1
     sample_points = sample_start + np.arange(len(fading)) * SPS
     sampled = matched[sample_points]
-    equalized = (sampled / np.where(np.abs(fading) < 1e-8, 1.0 + 0j, fading)).astype(np.complex64)
+    eps = 1e-6
+    fading_safe = np.where(
+        np.abs(fading) < eps,
+        eps * np.exp(1j * np.angle(fading + 1e-12)),
+        fading,
+    )
+    equalized = (sampled / fading_safe).astype(np.complex64, copy = False)
     points = constellation(modulation, order)
     detected_indices = _detect_nearest_points(equalized, points)
     width = int(round(math.log2(order)))
@@ -1154,7 +1176,7 @@ def demodulate(
     bits = bits[:expected_bits]
     if bits.size:
         bits = np.bitwise_xor(bits.astype(np.uint8, copy=False), _scramble_mask(len(bits)))
-    return matched, sampled, points[detected_indices], bits
+    return matched, equalized, points[detected_indices], bits
 
 
 def restore_output(kind: str, restored_bytes: bytes) -> tuple[str, np.ndarray | None, np.ndarray | None, int, bytes | None]:
@@ -1224,7 +1246,7 @@ def simulate_raw_modem(
     roll_off: float = DEFAULT_ROLL_OFF,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     tx_signal, tx_symbols, pulse = modulate(bits.astype(np.uint8), modulation, order, roll_off)
-    rx_signal, fading_symbols = apply_channel(tx_signal, tx_symbols, channel_name, snr_db, k_factor)
+    rx_signal, fading_symbols = apply_channel(tx_signal, tx_symbols, channel_name, snr_db, k_factor, pulse)
     matched_signal, sampled_symbols, _, detected_bits = demodulate(
         rx_signal, pulse, fading_symbols, modulation, order, len(bits)
     )
