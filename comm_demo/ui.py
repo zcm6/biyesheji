@@ -45,6 +45,7 @@ ANALYSIS_FREQ_WINDOW = 16384
 ANALYSIS_WELCH_SEGMENT = 2048
 ANALYSIS_WELCH_OVERLAP = 1024
 ANALYSIS_NFFT = 8192
+AUDIO_WAVEFORM_POINTS = 4000
 
 # 将NumPy数组（灰度图像数据）转换为PyQt的QPixmap，以便在图形界面显示图像
 def array_to_pixmap(array: np.ndarray) -> QPixmap:
@@ -126,6 +127,23 @@ def _random_sample_for_plot(signal: np.ndarray, max_points: int, seed: int = 202
     rng = np.random.default_rng(seed)
     indices = rng.choice(len(signal), size=max_points, replace=False)
     return signal[np.sort(indices)]
+
+# 返回有效语音附近的固定长度窗口及其在原始序列中的起点。
+def _audio_activity_window(samples: np.ndarray, max_points: int = AUDIO_WAVEFORM_POINTS) -> tuple[np.ndarray, int]:
+    if samples is None or len(samples) <= max_points:
+        return samples, 0
+    data = np.asarray(samples)
+    magnitude = np.abs(data)
+    peak = float(np.max(magnitude)) if magnitude.size else 0.0
+    if peak <= 1e-9:
+        return data[:max_points], 0
+    active = np.flatnonzero(magnitude > peak * 0.03)
+    if active.size == 0:
+        return data[:max_points], 0
+    start = max(0, int(active[0]) - max_points // 10)
+    end = min(len(data), start + max_points)
+    start = max(0, end - max_points)
+    return data[start:end], start
 
 
 def _welch_spectrum_db(
@@ -724,8 +742,9 @@ class MainWindow(QMainWindow):
         if self.session and self.session.source and self.session.source.audio_samples is not None:
             samples = self.session.source.audio_samples
             rate = self.session.source.sample_rate
-            x = np.arange(len(samples)) / max(rate, 1)
-            ax1.plot(x[: min(len(x), 4000)], samples[: min(len(samples), 4000)], color="#1f77b4")
+            display_samples, start = _audio_activity_window(samples)
+            x = np.arange(start, start + len(display_samples)) / max(rate, 1)
+            ax1.plot(x, display_samples, color="#1f77b4")
             ax1.set_title("原始语音波形")
             ax1.set_xlabel("时间(s)")
             ax1.grid(alpha=0.3)
@@ -735,8 +754,9 @@ class MainWindow(QMainWindow):
         if self.result and self.result.restored_audio_samples is not None:
             samples = self.result.restored_audio_samples
             rate = self.result.restored_audio_rate
-            x = np.arange(len(samples)) / max(rate, 1)
-            ax2.plot(x[: min(len(x), 4000)], samples[: min(len(samples), 4000)], color="#d62728")
+            display_samples, start = _audio_activity_window(samples)
+            x = np.arange(start, start + len(display_samples)) / max(rate, 1)
+            ax2.plot(x, display_samples, color="#d62728")
             ax2.set_title("恢复语音波形")
             ax2.set_xlabel("时间(s)")
             ax2.grid(alpha=0.3)
