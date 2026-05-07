@@ -318,7 +318,7 @@ class MainWindow(QMainWindow):
         self.channel_name.addItems(["AWGN", "瑞利衰落", "莱斯衰落"])
         self.channel_name.currentTextChanged.connect(self._sync_channel_params) # 根据信道模型同步相关参数的启用状态和提示信息
         self.gray_option = QComboBox()
-        self.gray_option.addItems(["\u5426", "\u662f"])
+        self.gray_option.addItems(["是", "否"])
         self.snr = QLineEdit("12")
         self.kfactor = QLineEdit("3")
         self.roll_off = QLineEdit("0.35")
@@ -329,7 +329,7 @@ class MainWindow(QMainWindow):
             ("调制方式", self.modulation),
             ("调制阶数", self.order),
             ("信道模型", self.channel_name),
-            ("\u683c\u96f7\u7801\u7f16\u7801", self.gray_option),
+            ("格雷码编码", self.gray_option),
             ("SNR(dB)", self.snr),
             ("莱斯 K", self.kfactor),
             ("滚降系数", self.roll_off),
@@ -845,7 +845,7 @@ class MainWindow(QMainWindow):
             ax.set_axis_off()
         self.bit_canvas.draw_idle()
 
-        # 画出信号的时域波形和频域频谱
+        # 画出信号的时域波形和功率谱
         signal_fig = self.signal_canvas.figure
         signal_fig.clear()
         ax1, ax2 = signal_fig.subplots(2, 1)
@@ -861,7 +861,7 @@ class MainWindow(QMainWindow):
             ax1.grid(alpha=0.3)
             ax1.legend()
 
-            # Frequency-domain view uses Welch averaging on a longer center window.
+            # 频域视图在较长的中心窗口上使用Welch平均法。
             freq_input = _center_window(np.asarray(selected_signal), ANALYSIS_FREQ_WINDOW)
             freq, spectrum_db = _welch_spectrum_db(
                 freq_input,
@@ -870,7 +870,7 @@ class MainWindow(QMainWindow):
                 overlap=ANALYSIS_WELCH_OVERLAP,
             )
             ax2.plot(freq, spectrum_db)
-            ax2.set_title(f"{self.signal_selector.currentText()}频谱")
+            ax2.set_title(f"{self.signal_selector.currentText()}功率谱")
             # ax.axis("equal")
             ax2.grid(alpha=0.3)
         else:
