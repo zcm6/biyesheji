@@ -129,15 +129,22 @@ def _random_sample_for_plot(signal: np.ndarray, max_points: int, seed: int = 202
     return signal[np.sort(indices)]
 
 # 返回有效语音附近的固定长度窗口及其在原始序列中的起点。
-def _audio_activity_window(samples: np.ndarray, max_points: int = AUDIO_WAVEFORM_POINTS) -> tuple[np.ndarray, int]:
+def _audio_activity_window(
+    samples: np.ndarray, max_points: int = AUDIO_WAVEFORM_POINTS, start: int | None = None
+) -> tuple[np.ndarray, int]:
     if samples is None or len(samples) <= max_points:
         return samples, 0
     data = np.asarray(samples)
+    if start is not None:
+        start = max(0, min(int(start), len(data) - max_points))
+        return data[start : start + max_points], start
     magnitude = np.abs(data)
     peak = float(np.max(magnitude)) if magnitude.size else 0.0
     if peak <= 1e-9:
         return data[:max_points], 0
-    active = np.flatnonzero(magnitude > peak * 0.03)
+    smooth_len = max(32, min(256, max_points // 20))
+    smooth = np.convolve(magnitude, np.ones(smooth_len, dtype=np.float32) / smooth_len, mode="same")
+    active = np.flatnonzero(smooth > peak * 0.03)
     if active.size == 0:
         return data[:max_points], 0
     start = max(0, int(active[0]) - max_points // 10)
@@ -739,10 +746,12 @@ class MainWindow(QMainWindow):
         fig = self.media_wave_canvas.figure
         fig.clear()
         ax1, ax2 = fig.subplots(2, 1)
+        audio_window_start: int | None = None
         if self.session and self.session.source and self.session.source.audio_samples is not None:
             samples = self.session.source.audio_samples
             rate = self.session.source.sample_rate
             display_samples, start = _audio_activity_window(samples)
+            audio_window_start = start
             x = np.arange(start, start + len(display_samples)) / max(rate, 1)
             ax1.plot(x, display_samples, color="#1f77b4")
             ax1.set_title("原始语音波形")
@@ -754,7 +763,7 @@ class MainWindow(QMainWindow):
         if self.result and self.result.restored_audio_samples is not None:
             samples = self.result.restored_audio_samples
             rate = self.result.restored_audio_rate
-            display_samples, start = _audio_activity_window(samples)
+            display_samples, start = _audio_activity_window(samples, start=audio_window_start)
             x = np.arange(start, start + len(display_samples)) / max(rate, 1)
             ax2.plot(x, display_samples, color="#d62728")
             ax2.set_title("恢复语音波形")
