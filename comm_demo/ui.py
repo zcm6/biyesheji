@@ -535,7 +535,7 @@ class MainWindow(QMainWindow):
 
     def _collect_session(self) -> SimulationSession:
         channel_name = self.channel_name.currentText()
-        gray_ok = self.gray_option.currentIndex() == 1
+        gray_ok = self.gray_option.currentIndex() == 0
         return create_session(
             kind=self.kind.currentText(),
             text=self.text_input.toPlainText(),
