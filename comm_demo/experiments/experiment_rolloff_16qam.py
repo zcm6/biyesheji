@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
-from comm_demo.pipeline import run_pipeline
+from comm_demo.core.session import run_pipeline
 
 
 IMAGE_PATH = Path("test_data") / "demo_image.png"

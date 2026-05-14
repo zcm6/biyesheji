@@ -718,24 +718,6 @@ def build_shannon_fano_codes(data: bytes) -> dict[int, str]:
     split(items)
     return {symbol: (code or "0") for symbol, code in codes.items()}
 
-"""
-    对原始数据进行信源编码（压缩），将其转换为二进制比特流。
-
-    支持三种编码方式：算术编码、哈夫曼编码、香农-范诺编码。
-    编码后的数据体积通常小于原始数据（除非数据完全随机）。
-
-    Args:
-        data (bytes): 原始的字节流数据（待压缩）。
-        method (str): 编码方式，可选值为 "算术编码"、"哈夫曼编码" 或其他（默认为香农-范诺）。
-
-    Returns:
-        tuple[np.ndarray, dict]: 包含两个元素的元组：
-            - np.ndarray: 编码后的比特流数组（由 0 和 1 组成的 uint8 数组）。
-            - dict: 编码元数据字典。
-                - 包含 'method' (方法名)。
-                - 包含 'length' (原始数据长度，用于解压时校验)。
-                - 若为哈夫曼/香农-范诺，包含 'codes' (解码所需的码表)。
-"""
 def source_encode(data: bytes, method: str) -> tuple[np.ndarray, dict]:
     if method == "算术编码":
         bits, meta = ArithmeticCoder.encode(data)
@@ -832,23 +814,6 @@ def hamming74_encode(bits: np.ndarray) -> np.ndarray:
     return encoded.reshape(-1)  # 重新变为一维比特流
 
 
-"""
-    对 (7, 4) 汉明编码的比特流进行解码，包含纠错步骤。
-
-    解码流程：
-    1. 填充并对齐数据，确保长度是 7 的倍数。
-    2. 计算伴随式，检测是否有错以及错误位置。
-    3. 根据伴随式纠正错误位（翻转错误的比特）。
-    4. 提取有效的数据位，丢弃校验位。
-    5. 根据原始长度截断数据，去除填充的 0。
-
-    Args:
-        bits (np.ndarray): 接收到的编码比特流（可能包含噪声错误）。
-        original_len (int): 编码前的原始数据长度，用于去除填充位。
-
-    Returns:
-        np.ndarray: 解码并纠错后的原始比特流。
-"""
 def hamming74_decode(bits: np.ndarray, original_len: int) -> np.ndarray:
     if len(bits) % 7:
         bits = np.r_[bits, np.zeros((-len(bits)) % 7, dtype=np.uint8)]
@@ -949,23 +914,6 @@ def viterbi_decode(bits: np.ndarray, original_len: int) -> np.ndarray:
         state = int(prev_state[step, state])
     return decoded[:original_len]
 
-"""
-    对比特流进行信道编码，添加冗余信息以实现检错或纠错功能。
-    
-    支持三种编码方式：
-    - "CRC": 循环冗余校验，添加 8 位校验位（仅检错）。
-    - "汉明码": (7,4) 汉明码，添加校验位（可纠错）。
-    - 其他: 默认为卷积编码（通常用于纠错）。
-
-    Args:
-        bits (np.ndarray): 输入的比特流数组（由 0 和 1 组成）。
-        method (str): 编码方式，可选 "CRC"、"汉明码" 或其他。
-
-    Returns:
-        tuple[np.ndarray, dict]: 包含两个元素的元组：
-            - np.ndarray: 编码后的比特流数组（长度通常会增加）。
-            - dict: 元数据字典，包含 'length' (原始数据长度)，用于解码时截取有效数据。
-"""
 def channel_encode(bits: np.ndarray, method: str) -> tuple[np.ndarray, dict]:
     if method == "CRC":
         crc = zlib.crc32(bits_to_bytes(bits)) & 0xFF   # 将32位校验码只保留最后8位
@@ -1017,22 +965,6 @@ def _scramble_mask(length: int) -> np.ndarray:
     rng = np.random.default_rng(20240518)
     return rng.integers(0, 2, size=length, dtype=np.uint8)
 
-"""
-    根据调制方式和阶数生成标准化的星座图坐标点。
-
-    生成的星座点会经过功率归一化处理，使其平均能量为 1。
-    这确保了不同调制方式下的信噪比（SNR）具有可比性。
-
-    Args:
-        modulation (str): 调制方式。
-            - "MASK": 多进制幅度键控（一维）。
-            - "MPSK": 多进制相移键控（二维，圆周分布）。
-            - 其他: 默认为矩形 QAM（正交幅度调制，二维，方形分布）。
-        order (int): 调制阶数（星座点总数），如 4, 16, 64。
-
-    Returns:
-        np.ndarray: 复数数组，表示星座图上所有点的坐标。
-"""
 def constellation(modulation: str, order: int) -> np.ndarray:
     if modulation == "MASK":
         levels = np.linspace(-(order - 1), order - 1, order, dtype=np.float32)
@@ -1046,26 +978,6 @@ def constellation(modulation: str, order: int) -> np.ndarray:
     return (points / np.sqrt(np.mean(np.abs(points) ** 2, dtype=np.float64))).astype(np.complex64)
 
 
-"""
-    对比特流进行数字基带调制，生成时域传输信号。
-
-    处理流程：
-    1. 比特分组与映射：将比特流按 log2(order) 分组，映射为复数星座点符号。
-    2. 上采样：在符号之间插入零，提高采样率。
-    3. 脉冲成形：使用根升余弦滤波器进行滤波，限制带宽并成形波形。
-
-    Args:
-        bits (np.ndarray): 输入的比特流数组（0和1）。
-        modulation (str): 调制方式（如 "BPSK", "QPSK", "QAM"）。
-        order (int): 调制阶数（如 2, 4, 16, 64）。
-        roll_off (float): 根升余弦滤波器的滚降因子 (0 < roll_off <= 1)。
-
-    Returns:
-        tuple[np.ndarray, np.ndarray, np.ndarray]: 包含三个元素的元组：
-            - signal (np.ndarray): 最终生成的时域调制信号（复数基带信号）。
-            - symbols (np.ndarray): 映射后的复数符号序列。
-            - pulse (np.ndarray): 根升余弦滤波器的冲激响应系数。
-"""
 def modulate(
     bits: np.ndarray, modulation: str, order: int, roll_off: float, gray_ok: bool = False
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1136,18 +1048,7 @@ def apply_channel(
     )
     return (rx + noise).astype(np.complex64, copy=False), fading.astype(np.complex64, copy=False)
 
-    """
-    判决器：在星座图中寻找与均衡信号欧几里得距离最近的星座点。
-    
-    采用分块处理机制，防止在长序列仿真时因距离矩阵过大导致内存溢出。
-    
-    Args:
-        equalized: 均衡后的复数采样点序列 
-        points: 标准星座图上的复数坐标集合
-        
-    Returns:
-        与输入序列等长的整数索引数组，代表每个采样点被判为哪个星座点
-    """
+
 DETECTION_CHUNK_SIZE = 8192
 def _detect_nearest_points(equalized: np.ndarray, points: np.ndarray) -> np.ndarray:
     if len(equalized) == 0:

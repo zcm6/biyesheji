@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import math
+import sys
+from pathlib import Path
+
 import numpy as np
-from pipeline import bits_to_ints, ints_to_bits, gray_to_binary, binary_to_gray
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from comm_demo.core.bits import bits_to_ints, ints_to_bits, gray_to_binary, binary_to_gray
 
 def hamming_distance(a, b):
     return sum(x != y for x, y in zip(a, b))
