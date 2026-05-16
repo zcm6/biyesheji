@@ -1,4 +1,4 @@
-from comm_demo.ui import run_app
+from comm_demo.gui.app import run_app
 
 
 if __name__ == "__main__":
