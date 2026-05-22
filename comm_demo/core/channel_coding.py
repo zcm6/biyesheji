@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import import_module
 import zlib
 
 import numpy as np
@@ -169,8 +170,37 @@ def channel_encode(bits: np.ndarray, method: str) -> tuple[np.ndarray, dict]:
     return convolutional_encode(bits), {"length": len(bits)}
 
 
-def channel_decode(bits: np.ndarray, meta: dict, method: str) -> tuple[np.ndarray, bool | None]:
+def _ai_convolutional_decode(
+    bits: np.ndarray,
+    original_len: int,
+    modulation: str,
+    order: int,
+    channel_name: str,
+) -> np.ndarray:
+    inference = import_module("ai卷积码译码.inference")
+    return inference.bigru_decode(
+        bits,
+        original_len,
+        modulation,
+        order,
+        input_mode="hard",
+        channel_name=channel_name,
+    )
+
+
+def channel_decode(
+    bits: np.ndarray,
+    meta: dict,
+    method: str,
+    *,
+    ai_decoder: bool = False,
+    modulation: str | None = None,
+    order: int | None = None,
+    channel_name: str = "AWGN",
+) -> tuple[np.ndarray, bool | None]:
     original_len = meta["length"]
+    if ai_decoder and method != "卷积码":
+        raise ValueError("AI 译码当前仅支持卷积码。")
     if method == "CRC":
         payload = bits[:-8] if len(bits) >= 8 else np.zeros(0, dtype=np.uint8)
         recv_crc = bits_to_bytes(bits[-8:])[0] if len(bits) >= 8 else 0
@@ -178,4 +208,8 @@ def channel_decode(bits: np.ndarray, meta: dict, method: str) -> tuple[np.ndarra
         return payload[:original_len], recv_crc == calc_crc
     if method == "汉明码":
         return hamming74_decode(bits, original_len), None
+    if ai_decoder:
+        if modulation is None or order is None:
+            raise ValueError("AI 卷积码译码需要调制方式和调制阶数。")
+        return _ai_convolutional_decode(bits, original_len, modulation, order, channel_name), None
     return viterbi_decode(bits, original_len), None

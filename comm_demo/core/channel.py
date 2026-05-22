@@ -12,9 +12,10 @@ def apply_channel(
     channel_name: str,
     snr_db: float,
     k_factor: float,
-    pulse: np.ndarray | None = None
+    pulse: np.ndarray | None = None,
+    rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    rng = np.random.default_rng()
+    rng = rng or np.random.default_rng()
     fading = np.ones(len(tx_symbols), dtype=np.complex64)
     if channel_name == "瑞利衰落":
         fading = ((rng.normal(size=len(tx_symbols)) + 1j * rng.normal(size=len(tx_symbols))) / np.sqrt(2)).astype(np.complex64)

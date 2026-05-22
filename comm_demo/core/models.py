@@ -41,6 +41,7 @@ class SourceArtifact:
         path: 文件路径（图像/语音模式）
         source_method: 信源编码方法（"无"/"哈夫曼编码"/"算术编码"/"香农-范诺编码"）
         channel_method: 信道编码方法（"无"/"CRC"/"汉明码"/"卷积码"）
+        ai_decoder: 是否使用 AI 卷积码译码器
         modulation: 调制方式（"MASK"/"MPSK"/"MQAM"）
         order: 调制阶数（如4表示4PSK、16表示16QAM）
         channel_name: 信道模型（"AWGN"/"瑞利衰落"/"莱斯衰落"）
@@ -62,6 +63,7 @@ class SimulationConfig:
     k_factor: float
     roll_off: float = DEFAULT_ROLL_OFF
     gray_ok: bool = False
+    ai_decoder: bool = False
 
 """
     完整仿真结果：包含链路各阶段的信号和数据
@@ -119,6 +121,7 @@ class SimulationResult:
             f"输入类型: {self.config.kind}",
             f"信源编码: {self.config.source_method}",
             f"信道编码: {self.config.channel_method}",
+            f"AI译码: {'是' if self.config.ai_decoder else '否'}",
             f"调制方式: {self.config.modulation}-{self.config.order}",
             f"信道模型: {self.config.channel_name}",
             f"SNR: {self.config.snr_db:.1f} dB",

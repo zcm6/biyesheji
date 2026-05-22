@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self._sync_mode()
         self._sync_order()
         self._sync_channel_params()
+        self._sync_ai_decoder()
         self._draw_media_waveforms()
         self._draw_idle_views()
         self._refresh_action_buttons()
@@ -178,6 +179,19 @@ class MainWindow(QMainWindow):
         self.source_method.addItems(["哈夫曼编码", "香农-范诺编码", "算术编码"])
         self.channel_method = QComboBox()
         self.channel_method.addItems(["CRC", "汉明码", "卷积码"])
+        self.channel_method.currentTextChanged.connect(self._sync_ai_decoder)
+        self.ai_decoder = QComboBox()
+        self.ai_decoder.addItems(["否", "是"])
+        channel_decode_row = QWidget()
+        channel_decode_layout = QHBoxLayout(channel_decode_row)
+        channel_decode_layout.setContentsMargins(0, 0, 0, 0)
+        channel_decode_layout.addWidget(self.channel_method, 1)
+        ai_decoder_row = QWidget()
+        ai_decoder_layout = QHBoxLayout(ai_decoder_row)
+        ai_decoder_layout.setContentsMargins(0, 0, 0, 0)
+        ai_decoder_layout.addWidget(QLabel("AI译码"))
+        ai_decoder_layout.addWidget(self.ai_decoder, 1)
+        channel_decode_layout.addWidget(ai_decoder_row, 1)
         self.modulation = QComboBox()
         self.modulation.addItems(["MASK", "MPSK", "MQAM"])
         self.modulation.currentTextChanged.connect(self._sync_order) # 根据调制方式同步可选的调制阶数
@@ -193,7 +207,7 @@ class MainWindow(QMainWindow):
         # 将上述参数配置项以标签-控件的形式添加到表单布局中，形成一个整齐的参数配置界面
         for label, widget in [
             ("信源编码", self.source_method),
-            ("信道编码", self.channel_method),
+            ("信道编码", channel_decode_row),
             ("调制方式", self.modulation),
             ("调制阶数", self.order),
             ("信道模型", self.channel_name),
@@ -360,6 +374,12 @@ class MainWindow(QMainWindow):
         self.kfactor.setPlaceholderText("" if is_rician else "仅莱斯衰落有效")
         self.kfactor.setToolTip("K 值仅在莱斯衰落信道下生效。")
 
+    def _sync_ai_decoder(self):
+        convolutional = self.channel_method.currentText() == "卷积码"
+        self.ai_decoder.setEnabled(convolutional)
+        if not convolutional:
+            self.ai_decoder.setCurrentText("否")
+
     def _browse_file(self):
         kind = self.kind.currentText()
         file_filter = "Images (*.png *.jpg *.jpeg *.bmp)" if kind == "图像" else "Wave (*.wav)"
@@ -392,6 +412,7 @@ class MainWindow(QMainWindow):
             k_factor=float(self.kfactor.text()) if channel_name == "莱斯衰落" else 3.0,
             roll_off=float(self.roll_off.text()),
             gray_ok=gray_ok,
+            ai_decoder=self.ai_decoder.currentText() == "是",
         )
 
     def _ensure_session(self):

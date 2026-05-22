@@ -100,7 +100,13 @@ class SimulationSession:
             message = f"完成匹配滤波与判决：恢复比特数 {len(self.rx_channel_bits)}"
         elif self.stage_index == 6:
             self.decoded_source_bits, crc_ok = channel_decode(
-                self.rx_channel_bits, self.channel_meta, self.config.channel_method
+                self.rx_channel_bits,
+                self.channel_meta,
+                self.config.channel_method,
+                ai_decoder=self.config.ai_decoder,
+                modulation=self.config.modulation,
+                order=self.config.order,
+                channel_name=self.config.channel_name,
             )
             if crc_ok is not None:
                 self.channel_meta["crc_ok"] = crc_ok
@@ -168,10 +174,23 @@ def create_session(
     k_factor: float,
     roll_off: float = DEFAULT_ROLL_OFF,
     gray_ok: bool = False,
+    ai_decoder: bool = False,
 ) -> SimulationSession:
     return SimulationSession(
         SimulationConfig(
-            kind, text, path, source_method, channel_method, modulation, order, channel_name, snr_db, k_factor, roll_off, gray_ok
+            kind,
+            text,
+            path,
+            source_method,
+            channel_method,
+            modulation,
+            order,
+            channel_name,
+            snr_db,
+            k_factor,
+            roll_off,
+            gray_ok,
+            ai_decoder,
         )
     )
 
@@ -189,9 +208,22 @@ def run_pipeline(
     k_factor: float,
     roll_off: float = DEFAULT_ROLL_OFF,
     gray_ok: bool = False,
+    ai_decoder: bool = False,
 ) -> SimulationResult:
     return create_session(
-        kind, text, path, source_method, channel_method, modulation, order, channel_name, snr_db, k_factor, roll_off, gray_ok
+        kind,
+        text,
+        path,
+        source_method,
+        channel_method,
+        modulation,
+        order,
+        channel_name,
+        snr_db,
+        k_factor,
+        roll_off,
+        gray_ok,
+        ai_decoder,
     ).run_all()
 
 

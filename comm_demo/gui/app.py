@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
+from pathlib import Path
 
 from PyQt5.QtGui import QFont, QFontDatabase
 from PyQt5.QtWidgets import QApplication
+
+
+def _configure_runtime_cache() -> None:
+    cache_dir = Path(tempfile.gettempdir()) / "comm_demo_mpl_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["MPLCONFIGDIR"] = str(cache_dir)
+
+
+_configure_runtime_cache()
 
 from .main_window import MainWindow
 from .plotting import configure_plot_fonts

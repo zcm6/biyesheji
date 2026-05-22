@@ -1,0 +1,5 @@
+PyQt5==5.15.7
+numpy==1.24.3
+Pillow==9.4.0
+matplotlib==3.7.2
+pyinstaller==6.20.0
