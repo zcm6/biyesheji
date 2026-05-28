@@ -7,7 +7,18 @@ import numpy as np
 from .bits import bits_to_ints, binary_to_gray, gray_to_binary, graydecode, grayecode, ints_to_bits
 from .constants import DEFAULT_SPAN, SPS
 
+
 def root_raised_cosine(beta: float, span_symbols: int = DEFAULT_SPAN, sps: int = SPS) -> np.ndarray:
+    """生成单位能量归一化的根升余弦滤波器。
+
+    Args:
+        beta: 根升余弦滤波器的滚降系数。
+        span_symbols: 滤波器覆盖的符号跨度。
+        sps: 每个符号对应的采样点数。
+
+    Returns:
+        float32 类型的一维数组，表示根升余弦脉冲成形滤波器系数。
+    """
     t = np.arange(-span_symbols * sps / 2, span_symbols * sps / 2 + 1, dtype=np.float32) / np.float32(sps)
     pulse = np.zeros_like(t, dtype=np.float32)
     for index, value in enumerate(t):
@@ -31,29 +42,32 @@ def root_raised_cosine(beta: float, span_symbols: int = DEFAULT_SPAN, sps: int =
 
 
 def _scramble_mask(length: int) -> np.ndarray:
+    """生成用于比特白化的确定性伪随机掩码。
+
+    Args:
+        length: 需要生成的掩码长度。
+
+    Returns:
+        uint8 类型的一维数组，元素为 0 或 1；当长度非正时返回空数组。
+    """
     if length <= 0:
         return np.zeros(0, dtype=np.uint8)
     # 用于数据白化的确定性伪随机二进制序列。
     rng = np.random.default_rng(20240518)
     return rng.integers(0, 2, size=length, dtype=np.uint8)
 
-"""
-    根据调制方式和阶数生成标准化的星座图坐标点。
 
-    生成的星座点会经过功率归一化处理，使其平均能量为 1。
-    这确保了不同调制方式下的信噪比（SNR）具有可比性。
+def constellation(modulation: str, order: int) -> np.ndarray:
+    """根据调制方式和阶数生成归一化星座图。
 
     Args:
-        modulation (str): 调制方式。
-            - "MASK": 多进制幅度键控（一维）。
-            - "MPSK": 多进制相移键控（二维，圆周分布）。
-            - 其他: 默认为矩形 QAM（正交幅度调制，二维，方形分布）。
-        order (int): 调制阶数（星座点总数），如 4, 16, 64。
+        modulation: 调制方式。``"MASK"`` 生成一维幅度星座，
+            ``"MPSK"`` 生成相位星座，其他取值按矩形 QAM 生成。
+        order: 调制阶数，即星座点数量。
 
     Returns:
-        np.ndarray: 复数数组，表示星座图上所有点的坐标。
-"""
-def constellation(modulation: str, order: int) -> np.ndarray:
+        complex64 类型的一维数组，包含平均能量归一化后的星座点。
+    """
     if modulation == "MASK":
         levels = np.linspace(-(order - 1), order - 1, order, dtype=np.float32)
         points = levels.astype(np.complex64)
@@ -66,29 +80,22 @@ def constellation(modulation: str, order: int) -> np.ndarray:
     return (points / np.sqrt(np.mean(np.abs(points) ** 2, dtype=np.float64))).astype(np.complex64)
 
 
-"""
-    对比特流进行数字基带调制，生成时域传输信号。
-
-    处理流程：
-    1. 比特分组与映射：将比特流按 log2(order) 分组，映射为复数星座点符号。
-    2. 上采样：在符号之间插入零，提高采样率。
-    3. 脉冲成形：使用根升余弦滤波器进行滤波，限制带宽并成形波形。
-
-    Args:
-        bits (np.ndarray): 输入的比特流数组（0和1）。
-        modulation (str): 调制方式（如 "BPSK", "QPSK", "QAM"）。
-        order (int): 调制阶数（如 2, 4, 16, 64）。
-        roll_off (float): 根升余弦滤波器的滚降因子 (0 < roll_off <= 1)。
-
-    Returns:
-        tuple[np.ndarray, np.ndarray, np.ndarray]: 包含三个元素的元组：
-            - signal (np.ndarray): 最终生成的时域调制信号（复数基带信号）。
-            - symbols (np.ndarray): 映射后的复数符号序列。
-            - pulse (np.ndarray): 根升余弦滤波器的冲激响应系数。
-"""
 def modulate(
     bits: np.ndarray, modulation: str, order: int, roll_off: float, gray_ok: bool = False
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """将输入比特流调制为复基带发送信号。
+
+    Args:
+        bits: 待调制的一维比特数组。
+        modulation: 调制方式，例如 ``"MASK"``、``"MPSK"`` 或 ``"MQAM"``。
+        order: 调制阶数。
+        roll_off: 根升余弦滤波器滚降系数。
+        gray_ok: 是否启用格雷映射。
+
+    Returns:
+        一个三元组，依次为脉冲成形后的发送信号、映射后的复数星座符号、
+        以及根升余弦滤波器系数。
+    """
     bits = np.asarray(bits, dtype=np.uint8).reshape(-1)
     if bits.size:
         bits = np.bitwise_xor(bits, _scramble_mask(len(bits)))
@@ -117,6 +124,15 @@ DETECTION_CHUNK_SIZE = 8192
 
 
 def _detect_nearest_points(equalized: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """对均衡后的采样符号执行最近星座点判决。
+
+    Args:
+        equalized: 均衡后的复数采样符号序列。
+        points: 标准星座图上的复数星座点。
+
+    Returns:
+        int32 类型的一维数组，包含每个采样符号对应的最近星座点索引。
+    """
     if len(equalized) == 0:
         return np.zeros(0, dtype=np.int32)
     indices = np.empty(len(equalized), dtype=np.int32)
@@ -130,6 +146,7 @@ def _detect_nearest_points(equalized: np.ndarray, points: np.ndarray) -> np.ndar
         indices[start : start + len(block)] = np.argmin(dist2, axis=1).astype(np.int32, copy=False)
     return indices
 
+
 def demodulate(
     rx_signal: np.ndarray,
     pulse: np.ndarray,
@@ -139,6 +156,21 @@ def demodulate(
     expected_bits: int,
     gray_ok: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """对接收信号进行匹配滤波、判决和比特恢复。
+
+    Args:
+        rx_signal: 经过信道后的接收端复基带信号。
+        pulse: 发送端使用的根升余弦滤波器系数。
+        fading: 符号级复衰落系数，用于接收端均衡。
+        modulation: 调制方式，需要与发送端保持一致。
+        order: 调制阶数，需要与发送端保持一致。
+        expected_bits: 期望恢复的有效比特数。
+        gray_ok: 是否按格雷映射方式进行反映射。
+
+    Returns:
+        一个四元组，依次为匹配滤波后的信号、均衡后的采样符号、
+        判决得到的星座点，以及恢复出的有效比特流。
+    """
     matched = np.convolve(rx_signal, pulse[::-1].conjugate(), mode="full").astype(np.complex64)
     sample_start = len(pulse) - 1
     sample_points = sample_start + np.arange(len(fading)) * SPS

@@ -6,7 +6,14 @@ from heapq import heappop, heappush
 
 import numpy as np
 
+
 class ArithmeticCoder:
+    """基于整数区间更新的算术编码器。
+
+    该类用于将信源字节序列编码为二进制比特流，并在解码阶段根据
+    编码时保存的频率表恢复原始字节数据。
+    """
+
     STATE_BITS = 32
     FULL = 1 << STATE_BITS
     HALF = FULL >> 1
@@ -17,6 +24,15 @@ class ArithmeticCoder:
 
     @staticmethod
     def build_frequencies(data: bytes) -> list[int]:
+        """统计算术编码使用的符号频率。
+
+        Args:
+            data: 待编码的原始字节数据。
+
+        Returns:
+            长度为 257 的频率列表，前 256 项对应字节值，最后一项对应
+            EOF 结束符号。
+        """
         freq = [1] * 257
         for value in data:
             freq[value] += 1
@@ -24,6 +40,14 @@ class ArithmeticCoder:
 
     @staticmethod
     def cumulative(freq: list[int]) -> list[int]:
+        """根据频率表生成累积频率表。
+
+        Args:
+            freq: 符号频率列表。
+
+        Returns:
+            累积频率列表，长度比输入频率表多 1，用于区间划分。
+        """
         total = 0
         cum = [0]
         for item in freq:
@@ -33,6 +57,15 @@ class ArithmeticCoder:
 
     @classmethod
     def encode(cls, data: bytes) -> tuple[np.ndarray, dict]:
+        """将字节数据编码为算术编码比特流。
+
+        Args:
+            data: 待编码的原始字节数据。
+
+        Returns:
+            一个二元组，包含 uint8 类型的编码比特流，以及解码所需的
+            元数据字典。元数据中保存了符号频率表。
+        """
         freq = cls.build_frequencies(data)
         cum = cls.cumulative(freq)
         total = cum[-1]
@@ -40,6 +73,11 @@ class ArithmeticCoder:
         bits: list[int] = []
 
         def emit(bit: int) -> None:
+            """输出一个确定比特并补齐延迟比特。
+
+            Args:
+                bit: 当前确定输出的比特值。
+            """
             nonlocal pending
             bits.append(bit)
             opposite = 1 - bit
@@ -71,6 +109,15 @@ class ArithmeticCoder:
 
     @classmethod
     def decode(cls, bits: np.ndarray, meta: dict) -> bytes:
+        """根据算术编码比特流恢复原始字节数据。
+
+        Args:
+            bits: 算术编码得到的比特流。
+            meta: 编码阶段保存的元数据，需包含 ``freq`` 频率表。
+
+        Returns:
+            解码恢复出的原始字节数据。
+        """
         freq = meta["freq"]
         cum = cls.cumulative(freq)
         total = cum[-1]
@@ -111,21 +158,15 @@ class ArithmeticCoder:
         return bytes(out)
 
 
-    """
-    将字节数据转换为一维二进制比特数组（0和1）。
-
-    该函数将输入的字节流按位拆解，例如将一个字节 0xFF 拆解为 [1,1,1,1,1,1,1,1]。
-    如果输入数据为空，则返回一个空数组。
+def build_huffman_codes(data: bytes) -> dict[int, str]:
+    """根据字节频率构建哈夫曼编码表。
 
     Args:
-        data (bytes): 输入的字节流数据。
+        data: 待编码的原始字节数据。
 
     Returns:
-        np.ndarray: 由 0 和 1 组成的 NumPy 数组，数据类型为 uint8。
-                    数组长度为输入字节数的 8 倍。
+        字典形式的哈夫曼码表，键为字节值，值为对应的二进制码字字符串。
     """
-
-def build_huffman_codes(data: bytes) -> dict[int, str]:
     heap: list[tuple[int, int, object]] = []
     index = 0
     for symbol, weight in Counter(data).items():
@@ -141,6 +182,12 @@ def build_huffman_codes(data: bytes) -> dict[int, str]:
     codes: dict[int, str] = {}
 
     def walk(node: object, prefix: str) -> None:
+        """递归遍历哈夫曼树并填充码表。
+
+        Args:
+            node: 当前遍历到的树节点。
+            prefix: 从根节点到当前节点对应的码字前缀。
+        """
         if isinstance(node, int):
             codes[node] = prefix or "0"
             return
@@ -152,10 +199,23 @@ def build_huffman_codes(data: bytes) -> dict[int, str]:
 
 
 def build_shannon_fano_codes(data: bytes) -> dict[int, str]:
+    """根据字节频率构建香农-范诺编码表。
+
+    Args:
+        data: 待编码的原始字节数据。
+
+    Returns:
+        字典形式的香农-范诺码表，键为字节值，值为对应的二进制码字字符串。
+    """
     items = sorted(Counter(data).items(), key=lambda item: (-item[1], item[0]))
     codes = {symbol: "" for symbol, _ in items}
 
     def split(block: list[tuple[int, int]]) -> None:
+        """递归划分符号集合并追加码字前缀。
+
+        Args:
+            block: 按频率排序后的符号与频率列表。
+        """
         if len(block) <= 1:
             return
         total = sum(freq for _, freq in block)
@@ -179,25 +239,19 @@ def build_shannon_fano_codes(data: bytes) -> dict[int, str]:
     split(items)
     return {symbol: (code or "0") for symbol, code in codes.items()}
 
-"""
-    对原始数据进行信源编码（压缩），将其转换为二进制比特流。
 
-    支持三种编码方式：算术编码、哈夫曼编码、香农-范诺编码。
-    编码后的数据体积通常小于原始数据（除非数据完全随机）。
+def source_encode(data: bytes, method: str) -> tuple[np.ndarray, dict]:
+    """对信源字节数据进行信源编码。
 
     Args:
-        data (bytes): 原始的字节流数据（待压缩）。
-        method (str): 编码方式，可选值为 "算术编码"、"哈夫曼编码" 或其他（默认为香农-范诺）。
+        data: 来自信源预处理阶段的原始字节载荷。
+        method: 信源编码方式。``"算术编码"`` 使用算术编码，
+            ``"哈夫曼编码"`` 使用哈夫曼编码，其他取值使用香农-范诺编码。
 
     Returns:
-        tuple[np.ndarray, dict]: 包含两个元素的元组：
-            - np.ndarray: 编码后的比特流数组（由 0 和 1 组成的 uint8 数组）。
-            - dict: 编码元数据字典。
-                - 包含 'method' (方法名)。
-                - 包含 'length' (原始数据长度，用于解压时校验)。
-                - 若为哈夫曼/香农-范诺，包含 'codes' (解码所需的码表)。
-"""
-def source_encode(data: bytes, method: str) -> tuple[np.ndarray, dict]:
+        一个二元组，包含 uint8 类型的信源编码比特流，以及解码所需的
+        元数据字典。
+    """
     if method == "算术编码":
         bits, meta = ArithmeticCoder.encode(data)
         meta["method"] = method   # 记录使用的方法名
@@ -212,6 +266,16 @@ def source_encode(data: bytes, method: str) -> tuple[np.ndarray, dict]:
 
 
 def source_decode(bits: np.ndarray, meta: dict, method: str) -> bytes:
+    """将信源编码比特流解码回字节数据。
+
+    Args:
+        bits: 待解码的信源编码比特流，通常来自信道解码输出。
+        meta: 信源编码阶段保存的元数据，用于恢复码表或频率表。
+        method: 信源解码方式，需要与编码阶段使用的方式一致。
+
+    Returns:
+        解码恢复出的字节数据，后续会交给信源输出恢复模块展示。
+    """
     if method == "算术编码":
         return ArithmeticCoder.decode(bits, meta)
     # 将码表转换为二叉前缀树，避免逐 bit 字符串拼接和哈希查找。

@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""AI-BiGRU 卷积码译码器推理工具。
+
+该模块根据调制方式、调制阶数和信道类型选择对应的 AWGN 专用模型，
+并将接收端硬判决比特或软信息送入 BiGRU 模型恢复原始信息比特。
+"""
+
 from pathlib import Path
 
 import numpy as np
@@ -29,10 +35,28 @@ _MODEL_CACHE: dict[tuple[Path, str], object] = {}
 
 
 def supported_configs() -> tuple[tuple[str, int], ...]:
+    """返回当前已配置模型支持的调制组合。
+
+    Returns:
+        由 ``(modulation, order)`` 组成的元组列表。
+    """
     return tuple(MODEL_FILES_BY_CONFIG)
 
 
 def select_model_path(modulation: str, order: int, channel_name: str = "AWGN") -> Path:
+    """根据调制配置选择对应的 AI-BiGRU 模型路径。
+
+    Args:
+        modulation: 当前链路使用的调制方式。
+        order: 当前链路使用的调制阶数。
+        channel_name: 当前链路使用的信道模型名称。
+
+    Returns:
+        与调制配置匹配的模型权重文件路径。
+
+    Raises:
+        ValueError: 当信道不是 AWGN，或当前调制配置没有可用模型时抛出。
+    """
     if channel_name != "AWGN":
         raise ValueError(f"当前 AI 卷积码专用模型仅支持 AWGN，收到: {channel_name}")
     key = (modulation, int(order))
@@ -42,6 +66,15 @@ def select_model_path(modulation: str, order: int, channel_name: str = "AWGN") -
 
 
 def load_model(path: Path, device: str):
+    """从检查点文件加载 BiGRU 译码模型。
+
+    Args:
+        path: 模型检查点文件路径。
+        device: 模型加载到的 PyTorch 设备。
+
+    Returns:
+        进入评估模式的 BiGRU 译码模型。
+    """
     checkpoint = torch.load(path, map_location="cpu")
     model = ConvCodeRNNDecoder(config_from_dict(checkpoint["config"])).to(device)
     model.load_state_dict(checkpoint["model_state"])
@@ -50,6 +83,11 @@ def load_model(path: Path, device: str):
 
 
 def preferred_device() -> str:
+    """选择当前环境优先使用的 PyTorch 推理设备。
+
+    Returns:
+        若 CUDA 可用则返回 ``"cuda"``，否则返回 ``"cpu"``。
+    """
     require_torch()
     return "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -65,7 +103,22 @@ def bigru_decode(
     model_cache: dict[tuple[Path, str], object] | None = None,
     window_steps: int = 8192,
 ) -> np.ndarray:
-    """Decode coded hard bits or soft values with the selected AWGN BiGRU model."""
+    """使用匹配的 AWGN 专用 BiGRU 模型译码接收序列。
+
+    Args:
+        received_values: 接收端硬判决比特或软信息序列。
+        original_len: 需要恢复的原始信息比特长度。
+        modulation: 当前链路使用的调制方式。
+        order: 当前链路使用的调制阶数。
+        input_mode: 模型输入模式，支持 ``"hard"`` 和 ``"soft"``。
+        channel_name: 当前链路使用的信道模型名称。
+        device: 可选的 PyTorch 推理设备；为空时自动选择。
+        model_cache: 可选的模型缓存字典，用于避免重复加载同一模型。
+        window_steps: 单次送入模型的最大时间步数。
+
+    Returns:
+        uint8 类型的一维数组，包含 AI-BiGRU 译码恢复出的信息比特。
+    """
     require_torch()
     device = device or preferred_device()
     path = select_model_path(modulation, order, channel_name)

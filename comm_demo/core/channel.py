@@ -6,6 +6,7 @@ import numpy as np
 
 from .constants import SPS
 
+
 def apply_channel(
     tx_signal: np.ndarray,
     tx_symbols: np.ndarray,
@@ -15,6 +16,22 @@ def apply_channel(
     pulse: np.ndarray | None = None,
     rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """对发送信号施加信道衰落和加性高斯白噪声。
+
+    Args:
+        tx_signal: 调制并脉冲成形后的发送端复基带信号。
+        tx_symbols: 调制得到的发送符号序列，用于生成符号级衰落系数。
+        channel_name: 信道模型名称，支持 ``"AWGN"``、``"瑞利衰落"`` 和
+            ``"莱斯衰落"``。
+        snr_db: 信噪比，单位为 dB。
+        k_factor: 莱斯衰落信道的 K 因子。
+        pulse: 脉冲成形滤波器系数。存在衰落信道时用于重新生成带衰落的
+            成形信号。
+        rng: 可选的 NumPy 随机数生成器，用于复现实验结果。
+
+    Returns:
+        一个二元组，包含经过信道和噪声后的接收信号，以及符号级复衰落系数。
+    """
     rng = rng or np.random.default_rng()
     fading = np.ones(len(tx_symbols), dtype=np.complex64)
     if channel_name == "瑞利衰落":
@@ -49,16 +66,3 @@ def apply_channel(
         scale=np.sqrt(noise_power / 2), size=len(rx)
     )
     return (rx + noise).astype(np.complex64, copy=False), fading.astype(np.complex64, copy=False)
-
-    """
-    判决器：在星座图中寻找与均衡信号欧几里得距离最近的星座点。
-    
-    采用分块处理机制，防止在长序列仿真时因距离矩阵过大导致内存溢出。
-    
-    Args:
-        equalized: 均衡后的复数采样点序列 
-        points: 标准星座图上的复数坐标集合
-        
-    Returns:
-        与输入序列等长的整数索引数组，代表每个采样点被判为哪个星座点
-    """

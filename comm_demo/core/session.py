@@ -14,13 +14,35 @@ from .modulation import demodulate, modulate
 from .source import prepare_source, restore_output
 from .source_coding import source_decode, source_encode
 
-"""
-    分步仿真会话：支持逐步执行和状态保存
-    与SimulationResult不同，Session用于交互式分步演示，
-    每一步执行一个通信阶段，可以暂停查看中间结果
-"""
+
 @dataclass
 class SimulationSession:
+    """管理一次通信链路仿真的分步执行状态。
+
+    Attributes:
+        config: 本次仿真的参数配置。
+        stage_index: 当前执行到的阶段索引。
+        history: 已完成阶段的文字记录。
+        source: 信源预处理结果。
+        source_bits: 原始信源比特流。
+        source_coded_bits: 信源编码后的比特流。
+        source_meta: 信源解码所需的元数据。
+        channel_coded_bits: 信道编码后的比特流。
+        channel_meta: 信道解码所需的元数据。
+        tx_symbols: 调制后的发送星座符号。
+        tx_signal: 脉冲成形后的发送信号。
+        pulse: 根升余弦脉冲成形滤波器。
+        rx_signal: 经过信道后的接收信号。
+        fading_symbols: 符号级信道衰落系数。
+        matched_signal: 匹配滤波后的信号。
+        sampled_symbols: 均衡后的采样符号。
+        detected_symbols: 判决后的星座符号。
+        rx_channel_bits: 解调恢复出的信道编码比特流。
+        decoded_source_bits: 信道解码后的信源编码比特流。
+        restored_bytes: 信源解码恢复出的字节数据。
+        stage_times: 各阶段的执行耗时。
+    """
+
     config: SimulationConfig
     stage_index: int = 0  # 当前执行到的阶段索引
     history: list[str] = field(default_factory=list)  # 执行历史
@@ -46,20 +68,27 @@ class SimulationSession:
     stage_times: dict[str, float] = field(default_factory=dict)
 
     def is_finished(self) -> bool:
-        """检查是否已完成所有阶段"""
+        """判断仿真流程是否已经执行完成。
+
+        Returns:
+            如果所有阶段均已完成，则返回 ``True``；否则返回 ``False``。
+        """
         return self.stage_index >= len(STAGE_NAMES)
 
     def next_stage(self) -> str:
-        """返回下一个阶段的名称（或'已完成'）"""
+        """返回当前待执行的仿真阶段名称。
+
+        Returns:
+            当前阶段名称；若流程已完成，则返回 ``"已完成"``。
+        """
         return "已完成" if self.is_finished() else STAGE_NAMES[self.stage_index]
 
-
-    """
-        执行下一个仿真阶段
-        根据stage_index执行对应的处理函数，并更新状态
-        返回执行结果的描述字符串
-    """
     def step(self) -> str:
+        """执行通信链路中的下一个仿真阶段。
+
+        Returns:
+            当前阶段完成后的历史记录文本。
+        """
         stage_name = self.next_stage()
         tick = time.perf_counter()
         if self.stage_index == 0:
@@ -124,11 +153,21 @@ class SimulationSession:
         return self.history[-1]
 
     def run_all(self) -> SimulationResult:
+        """连续执行所有剩余仿真阶段并生成完整结果。
+
+        Returns:
+            包含全链路中间数据和恢复结果的 SimulationResult 对象。
+        """
         while not self.is_finished():
             self.step()
         return self.build_result()
 
     def build_result(self) -> SimulationResult:
+        """根据当前会话状态构建完整仿真结果对象。
+
+        Returns:
+            汇总信源、编码、调制、信道、解调和恢复结果的 SimulationResult。
+        """
         restored_text, restored_image, restored_audio_samples, restored_audio_rate, restored_audio_wav = restore_output(
             self.source.kind, self.restored_bytes or b"", self.source.media_meta
         )
@@ -161,6 +200,7 @@ class SimulationSession:
             stage_times=self.stage_times.copy(),
         )
 
+
 def create_session(
     kind: str,
     text: str,
@@ -176,6 +216,26 @@ def create_session(
     gray_ok: bool = False,
     ai_decoder: bool = False,
 ) -> SimulationSession:
+    """根据用户配置创建分步仿真会话。
+
+    Args:
+        kind: 信源类型。
+        text: 文本信源内容。
+        path: 图像或语音文件路径。
+        source_method: 信源编码方式。
+        channel_method: 信道编码方式。
+        modulation: 调制方式。
+        order: 调制阶数。
+        channel_name: 信道模型名称。
+        snr_db: 信噪比，单位为 dB。
+        k_factor: 莱斯衰落信道的 K 因子。
+        roll_off: 根升余弦滤波器滚降系数。
+        gray_ok: 是否启用格雷映射。
+        ai_decoder: 是否启用 AI 卷积码译码器。
+
+    Returns:
+        初始化后的 SimulationSession 对象。
+    """
     return SimulationSession(
         SimulationConfig(
             kind,
@@ -210,6 +270,26 @@ def run_pipeline(
     gray_ok: bool = False,
     ai_decoder: bool = False,
 ) -> SimulationResult:
+    """按给定参数直接运行完整通信链路仿真。
+
+    Args:
+        kind: 信源类型。
+        text: 文本信源内容。
+        path: 图像或语音文件路径。
+        source_method: 信源编码方式。
+        channel_method: 信道编码方式。
+        modulation: 调制方式。
+        order: 调制阶数。
+        channel_name: 信道模型名称。
+        snr_db: 信噪比，单位为 dB。
+        k_factor: 莱斯衰落信道的 K 因子。
+        roll_off: 根升余弦滤波器滚降系数。
+        gray_ok: 是否启用格雷映射。
+        ai_decoder: 是否启用 AI 卷积码译码器。
+
+    Returns:
+        完整仿真结果对象。
+    """
     return create_session(
         kind,
         text,
@@ -236,6 +316,20 @@ def simulate_raw_modem(
     k_factor: float = 3.0,
     roll_off: float = DEFAULT_ROLL_OFF,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """运行不含信源和信道编码的原始调制解调链路。
+
+    Args:
+        bits: 待调制的一维比特数组。
+        modulation: 调制方式。
+        order: 调制阶数。
+        channel_name: 信道模型名称。
+        snr_db: 信噪比，单位为 dB。
+        k_factor: 莱斯衰落信道的 K 因子。
+        roll_off: 根升余弦滤波器滚降系数。
+
+    Returns:
+        一个三元组，依次为解调后的比特流、均衡后的采样符号和匹配滤波信号。
+    """
     tx_signal, tx_symbols, pulse = modulate(bits.astype(np.uint8), modulation, order, roll_off)
     rx_signal, fading_symbols = apply_channel(tx_signal, tx_symbols, channel_name, snr_db, k_factor, pulse)
     matched_signal, sampled_symbols, _, detected_bits = demodulate(

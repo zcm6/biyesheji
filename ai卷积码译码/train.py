@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""AI-BiGRU 卷积码译码模型训练入口。
+
+该模块负责生成训练批次、训练 BiGRU 译码器，并可选地通过固定图像和
+语音媒体链路验证模型 BER，只有通过验证条件的模型才会保存为正式权重。
+"""
+
 import argparse
 from pathlib import Path
 
@@ -19,14 +25,42 @@ MODEL_DIR = Path(__file__).resolve().parent / "models"
 
 
 def default_output_path(modulation: str, order: int, channel_name: str) -> Path:
+    """生成普通训练模型的默认保存路径。
+
+    Args:
+        modulation: 训练模型对应的调制方式。
+        order: 训练模型对应的调制阶数。
+        channel_name: 训练模型对应的信道模型名称。
+
+    Returns:
+        默认模型权重文件路径。
+    """
     return MODEL_DIR / f"bigru_{modulation.lower()}_{int(order)}_{channel_name.lower()}.pt"
 
 
 def default_media_output_path(modulation: str, order: int, channel_name: str) -> Path:
+    """生成媒体 BER 验证模型的默认保存路径。
+
+    Args:
+        modulation: 训练模型对应的调制方式。
+        order: 训练模型对应的调制阶数。
+        channel_name: 训练模型对应的信道模型名称。
+
+    Returns:
+        带媒体 BER 验证标记的默认模型权重文件路径。
+    """
     return MODEL_DIR / f"bigru_{modulation.lower()}_{int(order)}_{channel_name.lower()}_media_ber.pt"
 
 
 def best_output_path(output_path: Path) -> Path:
+    """根据正式输出路径生成最佳验证检查点路径。
+
+    Args:
+        output_path: 正式模型权重输出路径。
+
+    Returns:
+        后缀替换为 ``.best.pt`` 的最佳检查点路径。
+    """
     return output_path.with_suffix(".best.pt")
 
 
@@ -37,6 +71,18 @@ def checkpoint_payload(
     step: int,
     validation: dict | None = None,
 ) -> dict:
+    """构建可保存的训练检查点数据。
+
+    Args:
+        model: 当前训练中的 PyTorch 模型。
+        config: BiGRU 译码器配置。
+        args: 命令行训练参数。
+        step: 当前训练步数。
+        validation: 可选的媒体 BER 验证结果字典。
+
+    Returns:
+        包含模型参数、配置、训练参数、步数和验证结果的检查点字典。
+    """
     return {
         "model_state": model.state_dict(),
         "config": config_to_dict(config),
@@ -47,6 +93,7 @@ def checkpoint_payload(
 
 
 def main() -> None:
+    """解析命令行参数并执行 AI-BiGRU 译码器训练流程。"""
     require_torch()
     parser = argparse.ArgumentParser(description="Train a small BiGRU decoder for the project's convolutional code.")
     parser.add_argument("--max-steps", "--steps", dest="max_steps", type=int, default=3000)

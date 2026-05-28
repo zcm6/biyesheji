@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+"""AI-BiGRU 卷积码译码器的固定媒体 BER 验证工具。
+
+该模块使用固定图像和语音样本构造接收端测试序列，对比 AI-BiGRU
+译码与传统 Viterbi 译码的平均 BER，并为训练过程提供模型接受依据。
+"""
+
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +41,17 @@ DEFAULT_MEDIA = (
 
 @dataclass(frozen=True)
 class MediaValidationCase:
+    """保存一个固定媒体链路验证样本。
+
+    Attributes:
+        media_name: 媒体样本名称，例如图像或语音。
+        snr_db: 当前样本使用的信噪比，单位为 dB。
+        repeat_index: 当前信噪比下的重复实验编号。
+        target_bits: 原始目标比特流。
+        model_values: 输入 AI-BiGRU 模型的接收端观测序列。
+        viterbi_ber: 同一接收序列经过 Viterbi 译码得到的 BER。
+    """
+
     media_name: str
     snr_db: float
     repeat_index: int
@@ -45,6 +62,16 @@ class MediaValidationCase:
 
 @dataclass(frozen=True)
 class MediaValidationReport:
+    """保存固定媒体 BER 验证的汇总结果。
+
+    Attributes:
+        ai_avg_ber: AI-BiGRU 在所有媒体上的平均 BER。
+        viterbi_avg_ber: Viterbi 译码在所有媒体上的平均 BER。
+        ai_media_ber: AI-BiGRU 按媒体类型统计的平均 BER。
+        viterbi_media_ber: Viterbi 译码按媒体类型统计的平均 BER。
+        case_count: 参与统计的验证样本数量。
+    """
+
     ai_avg_ber: float
     viterbi_avg_ber: float
     ai_media_ber: dict[str, float]
@@ -53,6 +80,11 @@ class MediaValidationReport:
 
     @property
     def accepted(self) -> bool:
+        """判断 AI-BiGRU 验证结果是否满足保存条件。
+
+        Returns:
+            当 AI-BiGRU 平均 BER 不高于 Viterbi 平均 BER 时返回 ``True``。
+        """
         return self.ai_avg_ber <= self.viterbi_avg_ber
 
 
@@ -68,6 +100,23 @@ def _channel_values(
     input_mode: str,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """通过项目主通信链路生成接收端模型输入和硬判决比特。
+
+    Args:
+        coded_bits: 卷积编码后的发送比特流。
+        modulation: 调制方式。
+        order: 调制阶数。
+        channel_name: 信道模型名称。
+        snr_db: 信噪比，单位为 dB。
+        k_factor: 莱斯衰落信道的 K 因子。
+        roll_off: 根升余弦滤波器滚降系数。
+        gray_ok: 是否启用格雷映射。
+        input_mode: 模型输入模式，支持 ``"hard"`` 和 ``"soft"``。
+        rng: NumPy 随机数生成器。
+
+    Returns:
+        一个二元组，包含输入模型的接收端观测值，以及解调得到的硬判决比特。
+    """
     tx_signal, tx_symbols, pulse = modulate(coded_bits, modulation, order, roll_off, gray_ok)
     rx_signal, fading_symbols = apply_channel(
         tx_signal,
@@ -113,7 +162,25 @@ def build_validation_cases(
     gray_ok: bool = True,
     seed: int = 20260521,
 ) -> list[MediaValidationCase]:
-    """Precompute fixed media channel outputs for model validation."""
+    """预生成固定媒体链路验证样本。
+
+    Args:
+        modulation: 验证使用的调制方式。
+        order: 验证使用的调制阶数。
+        channel_name: 验证使用的信道模型名称。
+        snrs: 参与验证的信噪比集合。
+        repeats: 每个信噪比下的重复次数。
+        input_mode: 模型输入模式，支持 ``"hard"`` 和 ``"soft"``。
+        source_method: 固定媒体样本使用的信源编码方式。
+        k_factor: 莱斯衰落信道的 K 因子。
+        roll_off: 根升余弦滤波器滚降系数。
+        gray_ok: 是否启用格雷映射。
+        seed: 验证样本生成使用的随机种子。
+
+    Returns:
+        MediaValidationCase 列表，包含固定媒体在不同 SNR 和重复次数下的
+        接收端观测、目标比特和 Viterbi BER。
+    """
     rng = np.random.default_rng(seed)
     cases: list[MediaValidationCase] = []
     media_bits: dict[str, np.ndarray] = {}
@@ -162,6 +229,19 @@ def decode_model_values(
     device: str,
     window_steps: int = 8192,
 ) -> np.ndarray:
+    """使用 AI-BiGRU 模型对接收端观测序列进行分块译码。
+
+    Args:
+        model: 已加载的 BiGRU 译码模型。
+        received_values: 接收端硬判决比特或软信息序列。
+        original_len: 需要恢复的原始信息比特长度。
+        input_mode: 模型输入模式，支持 ``"hard"`` 和 ``"soft"``。
+        device: PyTorch 推理设备。
+        window_steps: 单次送入模型的最大时间步数。
+
+    Returns:
+        uint8 类型的一维数组，包含 AI-BiGRU 译码恢复出的信息比特。
+    """
     observations = bits_to_observations(received_values, input_mode=input_mode)
     if observations.size == 0:
         return np.zeros(0, dtype=np.uint8)
@@ -184,6 +264,18 @@ def evaluate_cases(
     device: str,
     window_steps: int = 8192,
 ) -> MediaValidationReport:
+    """评估 AI-BiGRU 模型在固定媒体样本上的 BER 表现。
+
+    Args:
+        model: 待评估的 BiGRU 译码模型。
+        cases: 预生成的固定媒体验证样本列表。
+        input_mode: 模型输入模式，支持 ``"hard"`` 和 ``"soft"``。
+        device: PyTorch 推理设备。
+        window_steps: 单次送入模型的最大时间步数。
+
+    Returns:
+        汇总 AI-BiGRU 和 Viterbi 平均 BER 的 MediaValidationReport。
+    """
     was_training = model.training
     model.eval()
     ai_by_media: dict[str, list[float]] = {}
@@ -217,6 +309,14 @@ def evaluate_cases(
 
 
 def report_to_dict(report: MediaValidationReport) -> dict:
+    """将媒体 BER 验证报告转换为可保存的字典。
+
+    Args:
+        report: 媒体 BER 验证报告对象。
+
+    Returns:
+        包含平均 BER、分媒体 BER、样本数量和接受标志的字典。
+    """
     return {
         "ai_avg_ber": report.ai_avg_ber,
         "viterbi_avg_ber": report.viterbi_avg_ber,
@@ -228,6 +328,15 @@ def report_to_dict(report: MediaValidationReport) -> dict:
 
 
 def format_report(step: int | None, report: MediaValidationReport) -> str:
+    """将媒体 BER 验证报告格式化为日志字符串。
+
+    Args:
+        step: 当前训练步数；独立验证时可为 ``None``。
+        report: 媒体 BER 验证报告对象。
+
+    Returns:
+        适合打印到控制台的一行验证结果字符串。
+    """
     prefix = f"step={step:5d} " if step is not None else ""
     return (
         f"{prefix}media_ai_avg_ber={report.ai_avg_ber:.8f} "
@@ -241,6 +350,7 @@ def format_report(step: int | None, report: MediaValidationReport) -> str:
 
 
 def main() -> None:
+    """解析命令行参数并对指定模型执行固定媒体 BER 验证。"""
     require_torch()
     parser = argparse.ArgumentParser(description="Validate a BiGRU decoder on fixed image and audio media cases.")
     parser.add_argument("--model", type=Path)

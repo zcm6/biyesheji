@@ -7,7 +7,17 @@ import numpy as np
 
 from .bits import bits_to_bytes, ints_to_bits
 
+
 def hamming74_encode(bits: np.ndarray) -> np.ndarray:
+    """对输入比特流进行 (7, 4) 汉明编码。
+
+    Args:
+        bits: 待编码的一维比特数组，元素应为 0 或 1。
+
+    Returns:
+        uint8 类型的一维数组。每 4 个信息位被编码为 7 位汉明码；
+        若输入长度不是 4 的整数倍，会在末尾补 0 后再编码。
+    """
     # 检查数据长度是否为4的倍数，如果不够则补0对齐
     if len(bits) % 4:
         bits = np.r_[bits, np.zeros((-len(bits)) % 4, dtype=np.uint8)]
@@ -27,24 +37,16 @@ def hamming74_encode(bits: np.ndarray) -> np.ndarray:
     return encoded.reshape(-1)  # 重新变为一维比特流
 
 
-"""
-    对 (7, 4) 汉明编码的比特流进行解码，包含纠错步骤。
-
-    解码流程：
-    1. 填充并对齐数据，确保长度是 7 的倍数。
-    2. 计算伴随式，检测是否有错以及错误位置。
-    3. 根据伴随式纠正错误位（翻转错误的比特）。
-    4. 提取有效的数据位，丢弃校验位。
-    5. 根据原始长度截断数据，去除填充的 0。
+def hamming74_decode(bits: np.ndarray, original_len: int) -> np.ndarray:
+    """对 (7, 4) 汉明编码比特流进行译码和单比特纠错。
 
     Args:
-        bits (np.ndarray): 接收到的编码比特流（可能包含噪声错误）。
-        original_len (int): 编码前的原始数据长度，用于去除填充位。
+        bits: 接收到的汉明编码比特流，可能包含信道误码。
+        original_len: 编码前的原始比特长度，用于去除编码补零。
 
     Returns:
-        np.ndarray: 解码并纠错后的原始比特流。
-"""
-def hamming74_decode(bits: np.ndarray, original_len: int) -> np.ndarray:
+        uint8 类型的一维数组，包含纠错并截断后的原始信息比特。
+    """
     if len(bits) % 7:
         bits = np.r_[bits, np.zeros((-len(bits)) % 7, dtype=np.uint8)]
     code = bits.reshape(-1, 7).astype(np.uint8).copy()
@@ -62,6 +64,14 @@ def hamming74_decode(bits: np.ndarray, original_len: int) -> np.ndarray:
 
 
 def convolutional_encode(bits: np.ndarray) -> np.ndarray:
+    """使用约束长度为 3 的卷积码对比特流进行编码。
+
+    Args:
+        bits: 待编码的一维比特数组，元素应为 0 或 1。
+
+    Returns:
+        uint8 类型的一维数组，包含速率为 1/2 的卷积编码输出。
+    """
     data = np.asarray(bits, dtype=np.uint8).reshape(-1)
     u = np.concatenate([data, np.zeros(2, dtype=np.uint8)])
     prev1 = np.concatenate([np.zeros(1, dtype=np.uint8), u[:-1]])
@@ -75,6 +85,15 @@ def convolutional_encode(bits: np.ndarray) -> np.ndarray:
 
 
 def viterbi_decode(bits: np.ndarray, original_len: int) -> np.ndarray:
+    """使用 Viterbi 算法对卷积编码比特流进行硬判决译码。
+
+    Args:
+        bits: 待译码的卷积编码比特流。
+        original_len: 卷积编码前的原始比特长度，用于截断尾比特和补零。
+
+    Returns:
+        uint8 类型的一维数组，包含恢复后的原始信息比特。
+    """
     data = np.asarray(bits, dtype=np.uint8).reshape(-1)
     if data.size % 2:
         data = data[:-1]
@@ -144,24 +163,18 @@ def viterbi_decode(bits: np.ndarray, original_len: int) -> np.ndarray:
         state = int(prev_state[step, state])
     return decoded[:original_len]
 
-"""
-    对比特流进行信道编码，添加冗余信息以实现检错或纠错功能。
-    
-    支持三种编码方式：
-    - "CRC": 循环冗余校验，添加 8 位校验位（仅检错）。
-    - "汉明码": (7,4) 汉明码，添加校验位（可纠错）。
-    - 其他: 默认为卷积编码（通常用于纠错）。
+
+def channel_encode(bits: np.ndarray, method: str) -> tuple[np.ndarray, dict]:
+    """对信源编码比特流进行信道编码或 CRC 校验附加。
 
     Args:
-        bits (np.ndarray): 输入的比特流数组（由 0 和 1 组成）。
-        method (str): 编码方式，可选 "CRC"、"汉明码" 或其他。
+        bits: 来自信源编码模块的一维比特数组。
+        method: 信道编码方式。``"CRC"`` 表示附加 8 位 CRC 校验，
+            ``"汉明码"`` 表示使用 (7, 4) 汉明码，其他取值默认使用卷积码。
 
     Returns:
-        tuple[np.ndarray, dict]: 包含两个元素的元组：
-            - np.ndarray: 编码后的比特流数组（长度通常会增加）。
-            - dict: 元数据字典，包含 'length' (原始数据长度)，用于解码时截取有效数据。
-"""
-def channel_encode(bits: np.ndarray, method: str) -> tuple[np.ndarray, dict]:
+        一个二元组，包含编码后的信道比特流，以及记录原始长度的元数据字典。
+    """
     if method == "CRC":
         crc = zlib.crc32(bits_to_bytes(bits)) & 0xFF   # 将32位校验码只保留最后8位
         return np.r_[bits, ints_to_bits([crc], 8)], {"length": len(bits)}  # 将数据与校验数据进行拼接
@@ -177,6 +190,18 @@ def _ai_convolutional_decode(
     order: int,
     channel_name: str,
 ) -> np.ndarray:
+    """调用外部 AI 模型对卷积码比特流进行译码。
+
+    Args:
+        bits: 待译码的卷积编码比特流。
+        original_len: 卷积编码前的原始比特长度。
+        modulation: 当前链路使用的调制方式。
+        order: 当前链路使用的调制阶数。
+        channel_name: 当前链路使用的信道模型名称。
+
+    Returns:
+        AI 译码器恢复出的原始信息比特数组。
+    """
     inference = import_module("ai卷积码译码.inference")
     return inference.bigru_decode(
         bits,
@@ -198,6 +223,24 @@ def channel_decode(
     order: int | None = None,
     channel_name: str = "AWGN",
 ) -> tuple[np.ndarray, bool | None]:
+    """对接收端比特流进行信道解码或 CRC 校验。
+
+    Args:
+        bits: 解调后得到的信道编码比特流。
+        meta: 信道编码阶段保存的元数据，需包含原始比特长度 ``length``。
+        method: 信道编码方式，需要与编码阶段保持一致。
+        ai_decoder: 是否使用 AI 卷积码译码器。
+        modulation: AI 译码时使用的调制方式。
+        order: AI 译码时使用的调制阶数。
+        channel_name: AI 译码时使用的信道模型名称。
+
+    Returns:
+        一个二元组，包含恢复后的信源编码比特流，以及 CRC 校验结果。
+        非 CRC 编码方式下第二项返回 ``None``。
+
+    Raises:
+        ValueError: 当请求 AI 译码非卷积码，或 AI 译码缺少调制参数时抛出。
+    """
     original_len = meta["length"]
     if ai_decoder and method != "卷积码":
         raise ValueError("AI 译码当前仅支持卷积码。")
