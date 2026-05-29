@@ -35,6 +35,7 @@ from comm_demo.core.constants import DEFAULT_TEXT, SPS
 from comm_demo.core.models import SimulationResult
 from comm_demo.core.session import SimulationSession, create_session
 from .dialogs import EyeDialog
+from .experiments_dialog import ExperimentsDialog
 from .media import array_to_pixmap, write_temp_wav
 from .plotting import (
     ANALYSIS_FREQ_WINDOW,
@@ -60,6 +61,7 @@ class MainWindow(QMainWindow):
         self.session: SimulationSession | None = None
         self.result: SimulationResult | None = None
         self.eye_dialog: EyeDialog | None = None
+        self.experiments_dialog: ExperimentsDialog | None = None
         self.input_audio_path: str | None = None
         self.output_audio_path: str | None = None
         self.worker_thread: QThread | None = None
@@ -235,10 +237,13 @@ class MainWindow(QMainWindow):
         self.eye_button.clicked.connect(self._open_eye_dialog)
         self.export_button = QPushButton("导出结果")
         self.export_button.clicked.connect(self._export)
+        self.experiment_button = QPushButton("实验中心")
+        self.experiment_button.clicked.connect(self._open_experiments_dialog)
         for index, button in enumerate(
             [self.start_button, self.pause_button, self.step_button, self.reset_button, self.eye_button, self.export_button]
         ):
             grid.addWidget(button, index // 2, index % 2)
+        grid.addWidget(self.experiment_button, 3, 0, 1, 2)
         return box
 
     # 构建主界面左侧的”核心指标“显示面板
@@ -826,6 +831,14 @@ class MainWindow(QMainWindow):
             self.eye_dialog.close()
         self.eye_dialog = EyeDialog(self.result.matched_signal, len(self.result.pulse))
         self.eye_dialog.show()
+
+    def _open_experiments_dialog(self):
+        if self.experiments_dialog is None or not self.experiments_dialog.isVisible():
+            self.experiments_dialog = ExperimentsDialog(self)
+            self.experiments_dialog.show()
+            return
+        self.experiments_dialog.raise_()
+        self.experiments_dialog.activateWindow()
 
     def _export(self):
         if self.result is None:

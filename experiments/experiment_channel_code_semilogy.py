@@ -20,6 +20,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from comm_demo.core.session import run_pipeline
 
+try:
+    from .common import ExperimentOutput
+except ImportError:
+    from common import ExperimentOutput
+
 
 IMAGE_PATH = Path("test_data") / "demo_image.png"
 RESULT_DIR = Path("experiment_results") / "channel_code_semilogy"
@@ -168,6 +173,20 @@ def main() -> None:
 
     print(f"Saved chart: {png_path}")
     print(f"Saved data:  {csv_path}")
+
+
+def run_experiment(progress_callback=None) -> ExperimentOutput:
+    """运行不同信道编码方式 BER 对比实验，并返回输出文件清单。"""
+    if progress_callback is not None:
+        progress_callback("正在运行不同信道编码方式 BER 对比实验...")
+    main()
+    return ExperimentOutput(
+        title="信道编码 BER 对比",
+        result_dir=RESULT_DIR,
+        image_paths=[RESULT_DIR / "channel_code_snr_ber.png"],
+        csv_paths=[RESULT_DIR / "channel_code_snr_ber.csv"],
+        summary="比较 CRC、汉明码和卷积码在 16QAM/AWGN 链路下的 BER 曲线。",
+    )
 
 
 if __name__ == "__main__":

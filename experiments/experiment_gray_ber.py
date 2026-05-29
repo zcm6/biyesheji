@@ -12,6 +12,11 @@ import numpy as np
 
 from comm_demo.core.session import run_pipeline
 
+try:
+    from .common import ExperimentOutput
+except ImportError:
+    from common import ExperimentOutput
+
 
 IMAGE_PATH = Path("test_data") / "demo_image.png"
 RESULT_DIR = Path("experiment_results")
@@ -166,6 +171,20 @@ def main() -> None:
 
     print(f"Saved chart: {png_path}")
     print(f"Saved data:  {csv_path}")
+
+
+def run_experiment(progress_callback=None) -> ExperimentOutput:
+    """运行自然映射与格雷码 BER 对比实验，并返回输出文件清单。"""
+    if progress_callback is not None:
+        progress_callback("正在运行自然映射与格雷码 BER 对比实验...")
+    main()
+    return ExperimentOutput(
+        title="格雷码映射 BER 对比",
+        result_dir=RESULT_DIR,
+        image_paths=[RESULT_DIR / "gray_ber_comparison.png"],
+        csv_paths=[RESULT_DIR / "gray_ber_comparison.csv"],
+        summary="比较自然映射和格雷码映射在 4 dB AWGN 条件下的 BER。",
+    )
 
 
 if __name__ == "__main__":

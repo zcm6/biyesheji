@@ -24,6 +24,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from ai卷积码译码.inference import load_model, preferred_device, select_model_path
 from ai卷积码译码.media_validation import build_validation_cases, decode_model_values
 
+try:
+    from .common import ExperimentOutput
+except ImportError:
+    from common import ExperimentOutput
+
 
 RESULT_DIR = Path("experiment_results") / "ai_viterbi_media_ber"
 SNR_VALUES = (0, 2, 4, 6, 8, 10)
@@ -342,6 +347,27 @@ def main() -> None:
         print(f"Saved chart:   {png_path}")
     print(f"Saved raw:     {raw_csv_path}")
     print(f"Saved summary: {summary_csv_path}")
+
+
+def run_experiment(progress_callback=None) -> ExperimentOutput:
+    """运行 AI-BiGRU 与 Viterbi 媒体 BER 对比实验，并返回输出文件清单。"""
+    if progress_callback is not None:
+        progress_callback("正在运行 AI-BiGRU 与 Viterbi 媒体 BER 对比实验...")
+    main()
+    return ExperimentOutput(
+        title="AI-BiGRU 与 Viterbi BER 对比",
+        result_dir=RESULT_DIR,
+        image_paths=[
+            RESULT_DIR / "ai_viterbi_media_ber_16ask_semilogy.png",
+            RESULT_DIR / "ai_viterbi_media_ber_16psk_semilogy.png",
+            RESULT_DIR / "ai_viterbi_media_ber_16qam_semilogy.png",
+        ],
+        csv_paths=[
+            RESULT_DIR / "ai_viterbi_media_ber_raw.csv",
+            RESULT_DIR / "ai_viterbi_media_ber_summary.csv",
+        ],
+        summary="比较 16ASK、16PSK、16QAM 下 AI-BiGRU 与硬判决 Viterbi 的媒体 BER。",
+    )
 
 
 if __name__ == "__main__":
